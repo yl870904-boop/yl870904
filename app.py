@@ -7,6 +7,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties
 from flask import Flask, request, abort, send_from_directory
+import random
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -77,7 +78,25 @@ SECTOR_DICT = {
     "軍工": ['2634.TW', '8033.TWO', '5284.TWO', '3005.TW', '8222.TWO'],
     "AI": ['3231.TW', '2382.TW', '6669.TW', '2376.TW', '2356.TW', '3017.TW'],
     "ETN": ['020020.TW', '020019.TW'], # 範例，較少人交易
-    "ETF": ['0050.TW', '0056.TW', '00878.TW', '00929.TW', '00919.TW', '006208.TW']
+    "ETF": ['0050.TW', '0056.TW', '00878.TW', '00929.TW', '00919.TW', '006208.TW'],
+
+    # 熱門集團股 (新增)
+    "台積電集團": ['2330.TW', '5347.TWO', '3443.TW', '3374.TW', '3661.TW', '3105.TWO'],
+    "鴻海集團": ['2317.TW', '2328.TW', '2354.TW', '6414.TW', '5243.TW', '3413.TW', '6451.TW'],
+    "台塑集團": ['1301.TW', '1303.TW', '1326.TW', '6505.TW', '2408.TW', '8039.TW'],
+    "聯電集團": ['2303.TW', '3037.TW', '3035.TW', '3034.TW', '3529.TWO', '6166.TWO'],
+    "長榮集團": ['2603.TW', '2618.TW', '2609.TW', '2637.TW', '2607.TW'],
+    "華新集團": ['1605.TW', '2492.TW', '5469.TWO', '6173.TWO', '8163.TWO', '2344.TW'],
+    "國巨集團": ['2327.TW', '2456.TW', '6271.TW', '5328.TWO', '3026.TW'],
+    "永豐餘集團": ['1907.TW', '8069.TWO', '6404.TW'],
+    "統一集團": ['1216.TW', '1232.TW', '2912.TW', '1210.TW'],
+    "遠東集團": ['1402.TW', '1102.TW', '2903.TW', '2845.TW', '1710.TW'],
+    "潤泰集團": ['2915.TW', '9945.TW', '8463.TW', '4174.TWO'],
+    "金仁寶集團": ['2312.TW', '2324.TW', '6282.TW', '3715.TW'],
+    "裕隆集團": ['2201.TW', '2204.TW', '2412.TW', '3122.TWO'],
+    "大同集團": ['2371.TW', '2313.TW', '3519.TW', '8081.TW'],
+    "聯華神通集團": ['1229.TW', '2347.TW', '3702.TW', '3005.TW'],
+    "友達集團": ['2409.TW', '4960.TW', '6120.TWO'],
 }
 
 # --- 4. 核心功能 A: 繪圖引擎 (含 EPS 與長短線建議) ---
@@ -226,10 +245,19 @@ def create_stock_chart(stock_code):
         print(f"繪圖錯誤: {e}")
         return None, str(e)
 
-# --- 5. 核心功能 B: 智能選股 (支援多板塊) ---
+# --- 5. 核心功能 B: 智能選股 (支援多板塊與隨機) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     # 決定要掃描的清單
-    if sector_name and sector_name in SECTOR_DICT:
+    if sector_name == "隨機":
+        # 收集所有股票
+        all_stocks = set()
+        for s_list in SECTOR_DICT.values():
+            for s in s_list:
+                all_stocks.add(s)
+        # 隨機抽取 30 檔進行掃描，避免掃描太久
+        watch_list = random.sample(list(all_stocks), min(30, len(all_stocks)))
+        title_prefix = "【熱門隨機】"
+    elif sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
         title_prefix = f"【{sector_name}股】"
     else:
@@ -290,6 +318,10 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             except Exception: continue
     except Exception as e: return [f"掃描錯誤: {str(e)}"]
     
+    # 如果是隨機推薦，將結果打亂後回傳
+    if sector_name == "隨機":
+        random.shuffle(recommendations)
+
     return title_prefix, recommendations[:6]
 
 # --- 6. Flask 路由設定 ---
@@ -326,25 +358,25 @@ def handle_message(event):
             "📊 **智能選股**\n"
             "輸入：`推薦` 或 `選股`\n"
             "👉 掃描全市場強勢股\n\n"
+            "🎲 **隨機靈感**\n"
+            "輸入：`隨機推薦` 或 `手氣不錯`\n"
+            "👉 隨機挖掘熱門強勢股\n\n"
             "💰 **小資選股**\n"
             "輸入：`百元推薦`\n"
             "👉 掃描 100 元以內的強勢股\n\n"
-            "🏭 **產業板塊選股** (支援以下指令)\n"
-            "輸入：`[板塊名]推薦`，例如：\n"
-            "• `半導體推薦`、`電子推薦`\n"
-            "• `航運推薦`、`鋼鐵推薦`\n"
-            "• `金融推薦`、`生技推薦`\n"
-            "• `紡織推薦`、`汽車推薦`\n"
-            "• `營建推薦`、`觀光推薦`\n"
-            "• `食品推薦`、`軍工推薦`\n"
-            "• `AI推薦`、`ETF推薦`\n"
+            "🏭 **產業板塊與集團選股**\n"
+            "輸入：`[名稱]推薦`，例如：\n"
+            "• `台積電集團推薦`、`鴻海集團推薦`\n"
+            "• `長榮集團推薦`、`台塑集團推薦`\n"
+            "• `華新集團推薦`、`裕隆集團推薦`\n"
+            "• `半導體推薦`、`航運推薦`\n"
             "======================\n"
-            "💡 試試看輸入：`觀光推薦`"
+            "💡 試試看輸入：`隨機推薦`"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=menu_text))
         return
 
-    # 判斷是否為板塊推薦指令
+    # 判斷是否為板塊/集團推薦指令
     sector_hit = None
     for sector in SECTOR_DICT.keys():
         # 如果使用者輸入 "電子股推薦" 或 "電子推薦"
@@ -374,6 +406,17 @@ def handle_message(event):
             reply_text += "\n====================\n💡 建議：輸入代號看詳細診斷。"
         else:
             reply_text = "目前無符合條件的百元內潛力股。"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+
+    elif user_msg in ["隨機推薦", "隨機", "手氣不錯", "熱門隨機推薦"]:
+        title_prefix, results = scan_potential_stocks(max_price=None, sector_name="隨機")
+        title = "🎲 【熱門隨機潛力股】"
+        if results:
+            reply_text = f"{title}\n(隨機挖掘強勢股)\n====================\n"
+            reply_text += "\n\n".join(results)
+            reply_text += "\n====================\n💡 建議：輸入代號看詳細診斷。"
+        else:
+            reply_text = "運氣不好，這次隨機抽樣沒找到強勢股，請再試一次！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif user_msg == "推薦" or user_msg == "選股":
@@ -410,7 +453,8 @@ def handle_message(event):
                 "或嘗試：\n"
                 "1. `2330` (查個股)\n"
                 "2. `推薦` (全市場掃描)\n"
-                "3. `觀光推薦` (板塊掃描)"
+                "3. `隨機推薦` (隨機靈感)\n"
+                "4. `台積電集團推薦` (集團掃描)"
             )
             line_bot_api.reply_message(
                 event.reply_token,
