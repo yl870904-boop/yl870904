@@ -72,7 +72,7 @@ def create_stock_chart(stock_code):
         golden = df[df['Position'] == 1.0]
         death = df[df['Position'] == -1.0]
 
-        # --- 生成個股分析報告 (新增功能) ---
+        # --- 生成個股分析報告 ---
         current_price = df['Close'].iloc[-1]
         ma20 = df['MA20'].iloc[-1]
         ma60 = df['MA60'].iloc[-1]
@@ -96,13 +96,11 @@ def create_stock_chart(stock_code):
             rsi_str = f"{rsi:.1f} (中性)"
 
         # 3. 計算目標價與停損點
-        # 目標價：布林通道上軌 (若是多頭)，或現價+5% (若是空頭反彈)
         if trend_score == 1:
             target_price = max(upper_band, current_price * 1.05)
         else:
             target_price = ma60 # 空頭時季線是壓力
             
-        # 停損點：月線支撐 (若是多頭)，或現價-5% (若是空頭)
         if trend_score == 1:
             stop_loss = ma20 if current_price > ma20 else current_price * 0.95
         else:
@@ -121,7 +119,6 @@ def create_stock_chart(stock_code):
             else:
                 advice = "趨勢偏空，反彈逢高減碼"
 
-        # 組合分析文字
         analysis_report = (
             f"📊 {target} 診斷報告\n"
             f"💰 現價: {current_price:.1f}\n"
@@ -163,23 +160,22 @@ def create_stock_chart(stock_code):
 
         fig.autofmt_xdate()
         
-        # 存檔
         filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
         filepath = os.path.join(static_dir, filename)
         plt.savefig(filepath, bbox_inches='tight')
         plt.close()
         
-        # 回傳圖片檔名 與 分析報告文字
         return filename, analysis_report
 
     except Exception as e:
         print(f"繪圖錯誤: {e}")
         return None, str(e)
 
-# --- 4. 核心功能 B: 智能選股 (代碼不變) ---
-def scan_potential_stocks():
-    # 觀察名單
+# --- 4. 核心功能 B: 智能選股 (支援百元與全市場) ---
+def scan_potential_stocks(max_price=None):
+    # 觀察名單 (包含高價權值股與熱門股)
     watch_list = [
+        '2330.TW', '2454.TW', '2317.TW', '3008.TW', '6669.TW', # 新增高價權值股
         '2303.TW', '2353.TW', '2324.TW', '2356.TW', '2409.TW', '3481.TW', 
         '2603.TW', '2609.TW', '2615.TW', '2618.TW', '2610.TW', '2606.TW',
         '2884.TW', '2885.TW', '2886.TW', '2890.TW', '2891.TW', '2892.TW', 
@@ -203,10 +199,15 @@ def scan_potential_stocks():
                 closes = closes.dropna()
                 if len(closes) < 60: continue
                 current_price = closes.iloc[-1]
-                if current_price > 100: continue
+                
+                # ★ 條件判斷：如果設定了 max_price，才進行價格過濾
+                if max_price is not None and current_price > max_price:
+                    continue
+                
                 ma20 = closes.rolling(20).mean().iloc[-1]
                 ma60 = closes.rolling(60).mean().iloc[-1]
                 std = closes.rolling(20).std().iloc[-1]
+                
                 if ma20 > ma60 and current_price > ma20:
                     bias = (current_price - ma20) / ma20 * 100
                     if bias < 10: 
@@ -248,14 +249,32 @@ def serve_image(filename):
 def handle_message(event):
     user_msg = event.message.text.strip()
     
-    if user_msg == "推薦" or user_msg == "選股":
-        results = scan_potential_stocks()
+    # ★ 判斷指令：百元推薦 vs 一般推薦
+    if user_msg == "百元推薦":
+        results = scan_potential_stocks(max_price=100)
+        title = "📊 【百元內潛力股交易計畫】"
+        
         if results:
-            reply_text = "📊 【百元潛力股交易計畫】\n(純屬演算法分析，非投資建議)\n====================\n"
+            reply_text = f"{title}\n(純屬演算法分析，非投資建議)\n====================\n"
+            reply_text += "\n\n".join(results)
+            reply_text += "\n====================\n💡 建議策略：\n接近月線買進，破停損賣出，\n到目標價分批獲利。"
+        else:
+            reply_text = "目前無符合條件的百元內潛力股，建議觀望。"
+            
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+
+    elif user_msg == "推薦" or user_msg == "選股":
+        # 不傳入 max_price，代表不限金額
+        results = scan_potential_stocks(max_price=None)
+        title = "📊 【全市場潛力股交易計畫】"
+        
+        if results:
+            reply_text = f"{title}\n(包含高價績優股，非投資建議)\n====================\n"
             reply_text += "\n\n".join(results)
             reply_text += "\n====================\n💡 建議策略：\n接近月線買進，破停損賣出，\n到目標價分批獲利。"
         else:
             reply_text = "目前市場震盪，無符合高勝率條件的個股，建議觀望。"
+            
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         
     else:
@@ -267,7 +286,6 @@ def handle_message(event):
             root_url = request.host_url.replace("http://", "https://")
             img_url = root_url + 'images/' + img_filename
             
-            # 回覆兩則訊息：1.圖片 2.分析報告文字
             line_bot_api.reply_message(
                 event.reply_token,
                 [
@@ -278,7 +296,7 @@ def handle_message(event):
         else:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=f"請輸入代號查詢，或輸入「推薦」獲取交易策略。\n(錯誤: {result_content})")
+                TextSendMessage(text=f"請輸入代號查詢，或輸入「推薦」/「百元推薦」獲取策略。\n(錯誤: {result_content})")
             )
 
 if __name__ == "__main__":
