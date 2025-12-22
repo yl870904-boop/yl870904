@@ -150,22 +150,33 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 4. 核心功能 A: 繪圖引擎 (含 EPS 與長短線建議) ---
+# --- 4. 核心功能 A: 繪圖引擎 (含 EPS 與長短線建議，支援上市上櫃自動判斷) ---
 def create_stock_chart(stock_code):
     try:
-        target = stock_code.upper().strip()
-        # 簡單判斷：如果是數字且長度為4，預設加 .TW (上市)，若找不到可能需提示使用者加 .TWO
-        if target.isdigit() and len(target) == 4:
-            target += ".TW"
+        raw_code = stock_code.upper().strip()
+        
+        # 判斷邏輯：支援自動加上櫃後綴
+        # 1. 如果使用者已經輸入 .TW 或 .TWO，直接使用
+        if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
+            target = raw_code
+            ticker = yf.Ticker(target)
+            df = ticker.history(period="1y")
+        else:
+            # 2. 如果沒輸入，先嘗試上市 .TW
+            target = raw_code + ".TW"
+            ticker = yf.Ticker(target)
+            df = ticker.history(period="1y")
+            
+            # 3. 如果上市抓不到，改試上櫃 .TWO
+            if df.empty:
+                target = raw_code + ".TWO"
+                ticker = yf.Ticker(target)
+                df = ticker.history(period="1y")
+        
+        if df.empty: return None, "找不到資料或代號錯誤 (請確認該股是否存在)"
         
         # 取得個股中文名稱
         stock_name = get_stock_name(target)
-        
-        # 抓取資料
-        ticker = yf.Ticker(target)
-        df = ticker.history(period="1y")
-        
-        if df.empty: return None, "找不到資料或代號錯誤"
 
         # 嘗試取得 EPS
         try:
