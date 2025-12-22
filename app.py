@@ -13,6 +13,9 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
+# --- 設定應用程式版本 ---
+APP_VERSION = "v2.1.0 (2025-12-22) - 優化上櫃查詢與集團股"
+
 # --- 設定 matplotlib 後端 (無介面模式) ---
 matplotlib.use('Agg')
 
@@ -150,7 +153,7 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 4. 核心功能 A: 繪圖引擎 (含 EPS 與長短線建議，支援上市上櫃自動判斷) ---
+# --- 4. 核心功能 A: 繪圖引擎 (含 EPS 與長短線建議，優化上市上櫃自動判斷) ---
 def create_stock_chart(stock_code):
     try:
         raw_code = stock_code.upper().strip()
@@ -167,13 +170,21 @@ def create_stock_chart(stock_code):
             ticker = yf.Ticker(target)
             df = ticker.history(period="1y")
             
-            # 3. 如果上市抓不到，改試上櫃 .TWO
-            if df.empty:
-                target = raw_code + ".TWO"
-                ticker = yf.Ticker(target)
-                df = ticker.history(period="1y")
-        
-        if df.empty: return None, "找不到資料或代號錯誤 (請確認該股是否存在)"
+            # 3. 如果上市抓不到 (資料為空或太少)，改試上櫃 .TWO
+            # 注意：有時候 yfinance 會回傳空的 DataFrame 但不報錯
+            if df.empty or len(df) < 5:
+                # 這裡是一個關鍵優化，嘗試切換到 .TWO
+                target_two = raw_code + ".TWO"
+                ticker_two = yf.Ticker(target_two)
+                df_two = ticker_two.history(period="1y")
+                
+                # 如果 .TWO 有資料，就使用 .TWO
+                if not df_two.empty and len(df_two) >= 5:
+                    target = target_two
+                    ticker = ticker_two
+                    df = df_two
+
+        if df.empty: return None, f"找不到 {target} 的資料，請確認代號是否正確。"
         
         # 取得個股中文名稱
         stock_name = get_stock_name(target)
@@ -408,7 +419,7 @@ def callback():
 
 @app.route("/")
 def home():
-    return "Hello, Stock Bot is Running!"
+    return f"Stock Bot is Running! Version: {APP_VERSION}"
 
 @app.route('/images/<filename>')
 def serve_image(filename):
@@ -418,13 +429,21 @@ def serve_image(filename):
 def handle_message(event):
     user_msg = event.message.text.strip()
     
+    # ★ 新增功能：版本查詢
+    if user_msg in ["版本", "version", "ver", "版號"]:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"📱 目前系統版本: {APP_VERSION}")
+        )
+        return
+
     # ★ 新增功能：功能選單
     if user_msg in ["功能", "指令", "Help", "help", "menu"]:
         menu_text = (
-            "🤖 **股市全能助理 功能清單**\n"
+            f"🤖 **股市全能助理 功能清單** ({APP_VERSION})\n"
             "======================\n\n"
             "🔍 **個股診斷**\n"
-            "輸入：`2330` 或 `台積電` (代號)\n"
+            "輸入：`2330` 或 `8069` (上市上櫃皆可)\n"
             "👉 提供線圖、EPS、長短線建議\n\n"
             "📊 **智能選股**\n"
             "輸入：`推薦` 或 `選股`\n"
@@ -441,8 +460,9 @@ def handle_message(event):
             "• `長榮集團推薦`、`台塑集團推薦`\n"
             "• `華新集團推薦`、`裕隆集團推薦`\n"
             "• `半導體推薦`、`航運推薦`\n"
+            "• `紡織推薦`、`觀光推薦`\n"
             "======================\n"
-            "💡 試試看輸入：`隨機推薦`"
+            "💡 試試看輸入：`版本` 可查詢系統狀態"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=menu_text))
         return
