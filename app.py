@@ -14,7 +14,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v2.1.0 (2025-12-22) - 優化上櫃查詢與集團股"
+APP_VERSION = "v2.3.0 (2025-12-24) - 新增自動重試機制與防限流優化"
 
 # --- 設定 matplotlib 後端 (無介面模式) ---
 matplotlib.use('Agg')
@@ -46,6 +46,18 @@ my_font = FontProperties(fname=font_file)
 # --- 3. 定義產業板塊資料庫 (大幅擴充版) ---
 # 包含圖片中的熱門分類
 SECTOR_DICT = {
+    # ★ 50檔百元內績優股 (混合電子、傳產、金融、ETF)
+    "百元績優": [
+        '2303.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '2409.TW', '3481.TW', 
+        '2408.TW', '2344.TW', '2337.TW', '3702.TW', '2312.TW', '6282.TW', '3260.TWO', 
+        '8150.TW', '6147.TWO', '5347.TWO', '2363.TW', '2449.TW', '3036.TW',
+        '2884.TW', '2880.TW', '2886.TW', '2891.TW', '2892.TW', '5880.TW', '2885.TW', 
+        '2890.TW', '2883.TW', '2887.TW', '2882.TW', '2881.TW', '2834.TW', '2801.TW',
+        '1101.TW', '1102.TW', '2002.TW', '2027.TW', '1605.TW', '1402.TW', '1907.TW', 
+        '2105.TW', '2618.TW', '2610.TW', '9945.TW', '2542.TW',
+        '00878.TW', '0056.TW', '00929.TW', '00919.TW'
+    ],
+
     # 電子與科技
     "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
     "電子": ['2317.TW', '2382.TW', '3231.TW', '2353.TW', '2357.TW', '2324.TW', '2301.TW', '2356.TW'],
@@ -102,10 +114,11 @@ SECTOR_DICT = {
     "友達集團": ['2409.TW', '4960.TW', '6120.TWO'],
 }
 
-# --- 股票代號名稱對照表 (手動維護以確保準確顯示) ---
+# --- 股票代號名稱對照表 (確保顯示中文) ---
 CODE_NAME_MAP = {
     '2330': '台積電', '2454': '聯發科', '2303': '聯電', '3711': '日月光', '3034': '聯詠', '2379': '瑞昱', '3443': '創意', '3035': '智原', '3661': '世芯',
     '2317': '鴻海', '2382': '廣達', '3231': '緯創', '2353': '宏碁', '2357': '華碩', '2324': '仁寶', '2301': '光寶科', '2356': '英業達',
+    '2352': '佳世達', '2337': '旺宏', '2344': '華邦電', '2449': '京元電', '2363': '矽統', '3036': '文曄',
     '3008': '大立光', '3406': '玉晶光', '2409': '友達', '3481': '群創', '6706': '惠特', '2340': '台亞',
     '2345': '智邦', '5388': '中磊', '2332': '友訊', '3704': '合勤控', '3596': '智易', '6285': '啟碁',
     '2308': '台達電', '2313': '華通', '3037': '欣興', '2383': '台光電', '2368': '金像電', '3044': '健鼎',
@@ -125,12 +138,13 @@ CODE_NAME_MAP = {
     '2501': '國建', '2542': '興富發', '5522': '遠雄', '2548': '華固', '2520': '冠德', '2538': '基泰',
     '2707': '晶華', '2727': '王品', '2723': '美食', '5706': '鳳凰', '2704': '六福',
     '2881': '富邦金', '2882': '國泰金', '2886': '兆豐金', '2891': '中信金', '2892': '第一金', '2884': '玉山金', '5880': '合庫金', '2880': '華南金', '2885': '元大金',
+    '2883': '開發金', '2887': '台新金', '2890': '永豐金', '2834': '臺企銀', '2801': '彰銀',
     '6446': '藥華藥', '1795': '美時', '4128': '中天', '1760': '寶齡富錦', '4114': '健喬', '4743': '合一', '3176': '基亞',
     '1722': '台肥', '1708': '東鹼', '1710': '東聯', '1717': '長興',
     '2634': '漢翔', '8033': '雷虎', '5284': 'jpp-KY', '3005': '神基', '8222': '寶一',
     '6669': '緯穎', '3017': '奇鋐',
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續', '00929': '復華科優息', '00919': '群益精選', '006208': '富邦台50',
-    '5347': '世界', '3374': '精材', '3105': '穩懋',
+    '5347': '世界', '3374': '精材', '3105': '穩懋', '3260': '威剛', '8150': '南茂', '6147': '頎邦',
     '2328': '廣宇', '2354': '鴻準', '6414': '樺漢', '5243': '乙盛', '3413': '京鼎', '6451': '訊芯',
     '6505': '台塑化', '2408': '南亞科', '8039': '台虹',
     '3529': '力旺', '6166': '凌華',
@@ -153,43 +167,61 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 4. 核心功能 A: 繪圖引擎 (含 EPS 與長短線建議，優化上市上櫃自動判斷) ---
+# --- 關鍵修正：具備重試機制的資料抓取函數 ---
+def fetch_data_with_retry(ticker, period="1y", retries=3, delay=2):
+    """
+    抓取資料並在遇到 Rate Limit 時自動重試
+    """
+    for i in range(retries):
+        try:
+            df = ticker.history(period=period)
+            if not df.empty:
+                return df
+            # 如果回傳空值，但不一定是錯誤，可能是沒資料，但這裡我們先當作沒抓到
+            time.sleep(0.5) 
+        except Exception as e:
+            error_str = str(e)
+            if "Too Many Requests" in error_str or "429" in error_str:
+                print(f"⚠️ 觸發 Yahoo 限流 ({ticker.ticker})，等待 {delay} 秒後重試 ({i+1}/{retries})...")
+                time.sleep(delay * (i + 1)) # 指數退避，每次等久一點
+            else:
+                # 如果是其他錯誤 (如代號不存在)，就直接拋出
+                raise e
+    return pd.DataFrame() # 重試失敗回傳空
+
+# --- 4. 核心功能 A: 繪圖引擎 (使用重試機制) ---
 def create_stock_chart(stock_code):
     try:
         raw_code = stock_code.upper().strip()
         
-        # 判斷邏輯：支援自動加上櫃後綴
-        # 1. 如果使用者已經輸入 .TW 或 .TWO，直接使用
+        # 1. 建立 Ticker 物件 (這裡還不會發送請求)
         if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
             target = raw_code
             ticker = yf.Ticker(target)
-            df = ticker.history(period="1y")
         else:
-            # 2. 如果沒輸入，先嘗試上市 .TW
+            # 預設先試上市
             target = raw_code + ".TW"
             ticker = yf.Ticker(target)
-            df = ticker.history(period="1y")
-            
-            # 3. 如果上市抓不到 (資料為空或太少)，改試上櫃 .TWO
-            # 注意：有時候 yfinance 會回傳空的 DataFrame 但不報錯
-            if df.empty or len(df) < 5:
-                # 這裡是一個關鍵優化，嘗試切換到 .TWO
-                target_two = raw_code + ".TWO"
-                ticker_two = yf.Ticker(target_two)
-                df_two = ticker_two.history(period="1y")
-                
-                # 如果 .TWO 有資料，就使用 .TWO
-                if not df_two.empty and len(df_two) >= 5:
-                    target = target_two
-                    ticker = ticker_two
-                    df = df_two
+        
+        # 2. 抓取資料 (使用重試機制)
+        df = fetch_data_with_retry(ticker, period="1y")
+        
+        # 3. 如果上市抓不到，嘗試切換到上櫃
+        if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
+            target_two = raw_code + ".TWO"
+            ticker_two = yf.Ticker(target_two)
+            df = fetch_data_with_retry(ticker_two, period="1y")
+            if not df.empty:
+                target = target_two
+                ticker = ticker_two # 更新 ticker 物件
 
-        if df.empty: return None, f"找不到 {target} 的資料，請確認代號是否正確。"
+        if df.empty: 
+            return None, "系統繁忙 (Yahoo 限流) 或 找不到該代號資料，請稍後再試。"
         
         # 取得個股中文名稱
         stock_name = get_stock_name(target)
 
-        # 嘗試取得 EPS
+        # 嘗試取得 EPS (EPS 資訊請求也可能失敗，但不應影響畫圖)
         try:
             stock_info = ticker.info
             eps = stock_info.get('trailingEps', None)
@@ -324,23 +356,20 @@ def create_stock_chart(stock_code):
         print(f"繪圖錯誤: {e}")
         return None, str(e)
 
-# --- 5. 核心功能 B: 智能選股 (支援多板塊與隨機) ---
+# --- 5. 核心功能 B: 智能選股 (支援多板塊與隨機，優化批量下載) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     # 決定要掃描的清單
     if sector_name == "隨機":
-        # 收集所有股票
         all_stocks = set()
         for s_list in SECTOR_DICT.values():
             for s in s_list:
                 all_stocks.add(s)
-        # 隨機抽取 30 檔進行掃描，避免掃描太久
         watch_list = random.sample(list(all_stocks), min(30, len(all_stocks)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
         title_prefix = f"【{sector_name}股】"
     else:
-        # 預設：全市場熱門股
         watch_list = [
             '2330.TW', '2454.TW', '2317.TW', '3008.TW', '6669.TW', 
             '2303.TW', '2353.TW', '2324.TW', '2356.TW', '2409.TW', '3481.TW', 
@@ -352,11 +381,20 @@ def scan_potential_stocks(max_price=None, sector_name=None):
         title_prefix = "【全市場】"
 
     recommendations = []
+    
+    # 批量下載 (使用 yf.download)
+    # yfinance 的批量下載如果其中一支失敗，通常不會中斷，但如果被限流則會全部失敗
+    # 這裡我們嘗試用 try-except 包裹，如果批量失敗，可以考慮分批或告知使用者
     try:
-        # 批次下載
-        data = yf.download(watch_list, period="3mo")
+        data = yf.download(watch_list, period="3mo", progress=False)
+        
+        # 檢查是否被限流 (如果 data 是空的)
+        if data.empty:
+             return [f"系統繁忙 (Yahoo 限流)，請稍後再試。"]
+
         for stock in watch_list:
             try:
+                # 資料提取邏輯 (處理 MultiIndex)
                 if isinstance(data.columns, pd.MultiIndex):
                     try: closes = data['Close'][stock]
                     except KeyError: continue
@@ -382,12 +420,11 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 # 篩選邏輯：站上月線 且 月線>季線 (多頭)
                 if ma20 > ma60 and current_price > ma20:
                     bias = (current_price - ma20) / ma20 * 100
-                    if bias < 15: # 放寬一點乖離率
+                    if bias < 15: 
                         stop_loss = ma20 * 0.99
                         upper_band = ma20 + (2 * std)
                         target_price = max(upper_band, current_price * 1.05)
                         
-                        # 顯示中文名稱
                         stock_name = get_stock_name(stock)
                         
                         info = (
@@ -398,9 +435,9 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                         )
                         recommendations.append(info)
             except Exception: continue
-    except Exception as e: return [f"掃描錯誤: {str(e)}"]
+    except Exception as e:
+        return [f"掃描錯誤: {str(e)}"]
     
-    # 如果是隨機推薦，將結果打亂後回傳
     if sector_name == "隨機":
         random.shuffle(recommendations)
 
@@ -454,15 +491,17 @@ def handle_message(event):
             "💰 **小資選股**\n"
             "輸入：`百元推薦`\n"
             "👉 掃描 100 元以內的強勢股\n\n"
+            "🏅 **績優選股 (新功能)**\n"
+            "輸入：`百元績優推薦`\n"
+            "👉 掃描 50 檔精選績優股\n\n"
             "🏭 **產業板塊與集團選股**\n"
             "輸入：`[名稱]推薦`，例如：\n"
             "• `台積電集團推薦`、`鴻海集團推薦`\n"
             "• `長榮集團推薦`、`台塑集團推薦`\n"
-            "• `華新集團推薦`、`裕隆集團推薦`\n"
             "• `半導體推薦`、`航運推薦`\n"
             "• `紡織推薦`、`觀光推薦`\n"
             "======================\n"
-            "💡 試試看輸入：`版本` 可查詢系統狀態"
+            "💡 試試看輸入：`百元績優推薦`"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=menu_text))
         return
@@ -485,7 +524,7 @@ def handle_message(event):
             reply_text += "\n\n".join(results)
             reply_text += "\n====================\n💡 建議：點擊代號可查看EPS與長短線建議。"
         else:
-            reply_text = f"目前{sector_hit}板塊無符合強勢條件的個股，建議觀望。"
+            reply_text = f"目前{sector_hit}板塊無符合強勢條件的個股，或系統繁忙請稍後再試。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif user_msg == "百元推薦":
@@ -496,7 +535,7 @@ def handle_message(event):
             reply_text += "\n\n".join(results)
             reply_text += "\n====================\n💡 建議：輸入代號看詳細診斷。"
         else:
-            reply_text = "目前無符合條件的百元內潛力股。"
+            reply_text = "目前無符合條件的百元內潛力股，或系統繁忙請稍後再試。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif user_msg in ["隨機推薦", "隨機", "手氣不錯", "熱門隨機推薦"]:
@@ -518,7 +557,7 @@ def handle_message(event):
             reply_text += "\n\n".join(results)
             reply_text += "\n====================\n💡 建議：輸入代號看詳細診斷。"
         else:
-            reply_text = "目前市場震盪，無符合條件個股。"
+            reply_text = "目前市場震盪，無符合條件個股，或系統繁忙請稍後再試。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         
     else:
