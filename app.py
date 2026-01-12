@@ -14,7 +14,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v4.1 職業級交易系統 (實盤可用)"
+APP_VERSION = "v4.2 新手友善版 (含名詞白話教學)"
 
 # --- 設定 matplotlib 後端 (無介面模式) ---
 matplotlib.use('Agg')
@@ -42,26 +42,43 @@ if not os.path.exists(font_file):
 
 my_font = FontProperties(fname=font_file)
 
+# --- ★ 新增：新手教學文案 (白話文解釋) ---
+TUTORIAL_TEXT = (
+    "🎓 **股市小白 專有名詞懶人包**\n"
+    "======================\n\n"
+    "📈 **1. 線圖怎麼看？**\n"
+    "• **黑線**: 每天的收盤價格。\n"
+    "• **橘虛線 (月線)**: 近20天大家的平均成本，是短線的生命線。\n"
+    "• **藍實線 (季線)**: 近60天大家的平均成本，是長線的保護傘。\n"
+    "• **🔺/ 🔻**: 系統幫你標出的黃金交叉(轉強買點)與死亡交叉(轉弱賣點)。\n\n"
+    "💰 **2. EPS (每股盈餘)**\n"
+    "• 翻譯：這家公司「每一股賺多少錢」。\n"
+    "• 用法：正數代表賺錢，負數代表賠錢。想存股一定要看這個，有賺錢才抱得久！\n\n"
+    "🏎️ **3. ADX (趨勢強度)**\n"
+    "• 翻譯：現在行情的「油門踩多深」。\n"
+    "• ADX > 25: 油門踩到底，趨勢很強，適合順勢操作。\n"
+    "• ADX < 20: 停車休息中，股價在那邊盤整，建議觀望。\n\n"
+    "🦅 **4. RS (相對強弱)**\n"
+    "• 翻譯：跟大盤 (0050) 賽跑的結果。\n"
+    "• RS > 1: 跑贏大盤！代表市場資金都在買這檔 (強勢股)。\n"
+    "• RS < 1: 跑輸大盤，可能被市場遺忘了 (弱勢股)。\n\n"
+    "🛡️ **5. ATR (真實波幅)**\n"
+    "• 翻譯：這支股票平均一天會「跳動多少錢」。\n"
+    "• 用法：用來設停損。波動大(ATR大)停損要設遠一點，才不會被隨便洗出場；波動小就設近一點。\n\n"
+    "💡 **一句話總結**：\n"
+    "看到「RS強 + ADX強 + 均線向上」，通常就是飆股的特徵喔！"
+)
+
 # --- 3. 全域快取 (EPS Cache) ---
-# 用來儲存已查詢過的 EPS，避免重複呼叫 yfinance.info 導致限流
 EPS_CACHE = {}
 
 def get_eps_cached(ticker_symbol):
-    """
-    取得 EPS (優先讀取快取)
-    """
     if ticker_symbol in EPS_CACHE:
         return EPS_CACHE[ticker_symbol]
-    
     try:
-        # yfinance.info 是一個網路請求，非常慢且容易被擋
-        # 這裡我們只在 cache miss 時呼叫
         info = yf.Ticker(ticker_symbol).info
         eps = info.get('trailingEps') or info.get('forwardEps')
-        if eps is None:
-            eps = 'N/A'
-        
-        # 寫入快取
+        if eps is None: eps = 'N/A'
         EPS_CACHE[ticker_symbol] = eps
         return eps
     except:
@@ -412,7 +429,8 @@ def create_stock_chart(stock_code):
             f"------------------\n"
             f"🎯 目標價: {target_price:.1f} (ATR*3)\n"
             f"🛑 停損點: {final_stop:.1f} (移動停損)\n"
-            f"💡 建議: {advice}"
+            f"💡 建議: {advice}\n"
+            f"(看不懂名詞？輸入「說明」看教學)"
         )
 
         # --- 繪圖 ---
@@ -618,6 +636,14 @@ def handle_message(event):
         )
         return
 
+    # ★ 新增：新手教學觸發
+    if user_msg in ["說明", "教學", "名詞解釋", "新手", "看不懂"]:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=TUTORIAL_TEXT)
+        )
+        return
+
     if user_msg in ["功能", "指令", "Help", "help", "menu"]:
         menu_text = (
             f"🤖 **股市全能助理 功能清單** ({APP_VERSION})\n"
@@ -645,7 +671,7 @@ def handle_message(event):
             "• `半導體推薦`、`航運推薦`\n"
             "• `紡織推薦`、`觀光推薦`\n"
             "======================\n"
-            "💡 試試看輸入：`百元績優推薦`"
+            "💡 試試看輸入：`說明` 可查看名詞解釋"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=menu_text))
         return
