@@ -14,7 +14,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v4.1 職業級交易系統 (Trend + RS + ATR)"
+APP_VERSION = "v4.1 職業級交易系統 (實盤可用)"
 
 # --- 設定 matplotlib 後端 (無介面模式) ---
 matplotlib.use('Agg')
@@ -42,9 +42,33 @@ if not os.path.exists(font_file):
 
 my_font = FontProperties(fname=font_file)
 
-# --- 3. 定義產業板塊資料庫 ---
+# --- 3. 全域快取 (EPS Cache) ---
+# 用來儲存已查詢過的 EPS，避免重複呼叫 yfinance.info 導致限流
+EPS_CACHE = {}
+
+def get_eps_cached(ticker_symbol):
+    """
+    取得 EPS (優先讀取快取)
+    """
+    if ticker_symbol in EPS_CACHE:
+        return EPS_CACHE[ticker_symbol]
+    
+    try:
+        # yfinance.info 是一個網路請求，非常慢且容易被擋
+        # 這裡我們只在 cache miss 時呼叫
+        info = yf.Ticker(ticker_symbol).info
+        eps = info.get('trailingEps') or info.get('forwardEps')
+        if eps is None:
+            eps = 'N/A'
+        
+        # 寫入快取
+        EPS_CACHE[ticker_symbol] = eps
+        return eps
+    except:
+        return 'N/A'
+
+# --- 4. 定義產業板塊資料庫 ---
 SECTOR_DICT = {
-    # ★ 50檔百元內績優股
     "百元績優": [
         '2303.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '2409.TW', '3481.TW', 
         '2408.TW', '2344.TW', '2337.TW', '3702.TW', '2312.TW', '6282.TW', '3260.TWO', 
@@ -55,7 +79,6 @@ SECTOR_DICT = {
         '2105.TW', '2618.TW', '2610.TW', '9945.TW', '2542.TW',
         '00878.TW', '0056.TW', '00929.TW', '00919.TW'
     ],
-    # 熱門集團股
     "台積電集團": ['2330.TW', '5347.TWO', '3443.TW', '3374.TW', '3661.TW', '3105.TWO'],
     "鴻海集團": ['2317.TW', '2328.TW', '2354.TW', '6414.TW', '5243.TW', '3413.TW', '6451.TW'],
     "台塑集團": ['1301.TW', '1303.TW', '1326.TW', '6505.TW', '2408.TW', '8039.TW'],
@@ -72,7 +95,6 @@ SECTOR_DICT = {
     "大同集團": ['2371.TW', '2313.TW', '3519.TW', '8081.TW'],
     "聯華神通集團": ['1229.TW', '2347.TW', '3702.TW', '3005.TW'],
     "友達集團": ['2409.TW', '4960.TW', '6120.TWO'],
-    # 產業
     "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
     "電子": ['2317.TW', '2382.TW', '3231.TW', '2353.TW', '2357.TW', '2324.TW', '2301.TW', '2356.TW'],
     "光電": ['3008.TW', '3406.TW', '2409.TW', '3481.TW', '6706.TW', '2340.TW'],
@@ -154,15 +176,14 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 輔助計算函數 (修正版) ---
+# --- 輔助計算函數 ---
 def calculate_adx(df, window=14):
-    """計算 ADX (使用標準 +DM/-DM 邏輯修正)"""
+    """計算 ADX (修正版: 標準 +DM/-DM 邏輯)"""
     try:
         high = df['High']
         low = df['Low']
         close = df['Close']
         
-        # 修正：標準 ADX 計算邏輯
         up_move = high.diff()
         down_move = -low.diff()
         
@@ -182,14 +203,17 @@ def calculate_adx(df, window=14):
         plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
         
-        dx = (abs(plus_di - minus_di) / abs(plus_di + minus_di)) * 100
+        # 避免除以零
+        sum_di = abs(plus_di + minus_di)
+        sum_di = sum_di.replace(0, 1) 
+        
+        dx = (abs(plus_di - minus_di) / sum_di) * 100
         adx = dx.rolling(window).mean()
         return adx
     except:
         return pd.Series([0]*len(df), index=df.index)
 
 def calculate_atr(df, window=14):
-    """計算 ATR (Average True Range)"""
     try:
         high = df['High']
         low = df['Low']
@@ -204,7 +228,6 @@ def calculate_atr(df, window=14):
         return pd.Series([0]*len(df), index=df.index)
 
 def calculate_obv(df):
-    """計算 OBV (On-Balance Volume)"""
     try:
         obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
         return obv
@@ -226,7 +249,7 @@ def fetch_data_with_retry(ticker, period="1y", retries=3, delay=2):
                 raise e
     return pd.DataFrame()
 
-# --- 4. 核心功能 A: 繪圖引擎 (v4.1 職業級升級) ---
+# --- 4. 核心功能 A: 繪圖引擎 (v4.1) ---
 def create_stock_chart(stock_code):
     try:
         raw_code = stock_code.upper().strip()
@@ -251,65 +274,51 @@ def create_stock_chart(stock_code):
             return None, "系統繁忙 (Yahoo 限流) 或 找不到該代號資料，請稍後再試。"
         
         stock_name = get_stock_name(target)
+        eps = get_eps_cached(target)
 
-        # 抓取大盤資料 (0050.TW 作為基準) 計算 RS
+        # 抓大盤 RS
         try:
             bench_ticker = yf.Ticker("0050.TW")
             bench_df = fetch_data_with_retry(bench_ticker, period="1y")
         except:
             bench_df = pd.DataFrame()
 
-        # 嘗試取得 EPS
-        try:
-            stock_info = ticker.info
-            eps = stock_info.get('trailingEps', None)
-            if eps is None: eps = stock_info.get('forwardEps', 'N/A')
-        except:
-            eps = 'N/A'
-
-        # --- 技術指標計算 ---
-        # 1. 均線與斜率
+        # --- 指標計算 ---
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['MA60'] = df['Close'].rolling(window=60).mean()
         df['MA20_Slope'] = df['MA20'].diff(5)
         
-        # 2. RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs_idx = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs_idx))
 
-        # 3. 成交量結構
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
 
-        # 4. 進階指標: ADX, ATR, OBV
         df['ADX'] = calculate_adx(df)
         df['ATR'] = calculate_atr(df)
         df['OBV'] = calculate_obv(df)
 
-        # 5. RS 相對強弱 (20日漲幅比較)
+        # RS 計算
         if not bench_df.empty:
-            # 確保索引對齊
             common_idx = df.index.intersection(bench_df.index)
             stock_close = df.loc[common_idx, 'Close']
             bench_close = bench_df.loc[common_idx, 'Close']
-            
             stock_ret = stock_close.pct_change(20)
             bench_ret = bench_close.pct_change(20)
-            # RS = (1+個股漲幅) / (1+大盤漲幅)
             df.loc[common_idx, 'RS'] = (1 + stock_ret) / (1 + bench_ret)
         else:
-            df['RS'] = 1.0 # 無法計算時預設
+            df['RS'] = 1.0
 
-        # --- 訊號判斷 ---
+        # --- 訊號 ---
         df['Signal'] = np.where(df['MA20'] > df['MA60'], 1.0, 0.0)
         df['Position'] = df['Signal'].diff()
         golden = df[df['Position'] == 1.0]
         death = df[df['Position'] == -1.0]
 
-        # --- 取得最新數據 ---
+        # --- 最新數據 ---
         current_price = df['Close'].iloc[-1]
         ma20 = df['MA20'].iloc[-1]
         ma60 = df['MA60'].iloc[-1]
@@ -320,20 +329,20 @@ def create_stock_chart(stock_code):
         atr = df['ATR'].iloc[-1]
         rs_val = df['RS'].iloc[-1]
         
-        # --- 策略分析邏輯 (v4.1 升級版) ---
+        # --- 策略分析 (v4.1) ---
         
-        # A. 趨勢品質 (ADX)
+        # 趨勢品質 (ADX)
         if adx < 20:
             trend_quality = "盤整 (無趨勢) 💤"
             trend_valid = False
-        elif adx > 50:
-            trend_quality = "極強 (過熱風險) 🔥"
+        elif adx > 40: # 修正：ADX > 40 提醒
+            trend_quality = "趨勢強勁 (留意回檔，勿追高) 🔥"
             trend_valid = True
         else:
             trend_quality = "趨勢確立 ✅"
             trend_valid = True
 
-        # B. 趨勢方向
+        # 趨勢方向
         if ma20 > ma60 and ma20_slope > 0:
             trend_dir = "多頭"
         elif ma20 < ma60 and ma20_slope < 0:
@@ -341,17 +350,18 @@ def create_stock_chart(stock_code):
         else:
             trend_dir = "震盪"
 
-        # C. 相對強弱 (RS)
         if rs_val > 1.05: rs_str = "強於大盤 (資金青睞) 🦅"
         elif rs_val < 0.95: rs_str = "弱於大盤 (遭提款) 🐢"
         else: rs_str = "跟隨大盤"
 
-        # D. R值風控 (ATR + 移動停損)
-        # 停損：多頭時為 現價 - 1.5*ATR (或月線取高者保險 - 移動停損概念)
+        # R值風控
+        if np.isnan(atr) or atr <= 0: # 防呆
+            atr = current_price * 0.02
+            
         atr_stop_loss = current_price - (atr * 1.5)
         
         if trend_dir == "多頭":
-            # 如果月線目前低於現價，則把月線也納入考量，取較高者保護獲利
+            # 移動停損：取 ATR 停損與月線的最大值
             if ma20 < current_price:
                 final_stop = max(atr_stop_loss, ma20)
             else:
@@ -359,28 +369,28 @@ def create_stock_chart(stock_code):
         else:
             final_stop = atr_stop_loss
         
-        # 目標：現價 + 3*ATR (期望值)
         target_price = current_price + (atr * 3)
 
-        # OBV 背離檢查 (價格創高但 OBV 沒創高)
+        # OBV 背離
         obv_warning = ""
         try:
             price_trend = df['Close'].iloc[-1] > df['Close'].iloc[-10]
             obv_trend = df['OBV'].iloc[-1] < df['OBV'].iloc[-10]
             if price_trend and obv_trend:
                 obv_warning = " (⚠️價漲量縮，留意背離)"
-        except:
-            pass
+        except: pass
 
-        # E. 綜合診斷
+        # 綜合診斷
         advice = "觀望"
         if trend_dir == "多頭":
-            if not trend_valid: # ADX < 20
-                advice = "多頭排列但動能不足，易洗盤，觀望或區間操作"
+            if adx < 20:
+                advice = "盤整股，不符本系統交易條件"
             elif rs_val < 1:
                 advice = "個股趨勢雖好但跑輸大盤，補漲或假突破留意"
             elif vol_ratio > 3:
                 advice = "短線爆量過熱" + obv_warning
+            elif rsi < 40:
+                advice = "多頭趨勢回檔中，耐心等量縮止跌"
             elif 60 <= rsi <= 75:
                 advice = "量價健康，趨勢強勁，R值漂亮可佈局"
             elif rsi > 80:
@@ -401,25 +411,22 @@ def create_stock_chart(stock_code):
             f"⚡ RSI: {rsi:.1f}\n"
             f"------------------\n"
             f"🎯 目標價: {target_price:.1f} (ATR*3)\n"
-            f"🛑 停損點: {final_stop:.1f} (ATR/月線)\n"
+            f"🛑 停損點: {final_stop:.1f} (移動停損)\n"
             f"💡 建議: {advice}"
         )
 
-        # --- 開始繪圖 ---
+        # --- 繪圖 ---
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
 
-        # 主圖
         ax1.plot(df.index, df['Close'], color='black', alpha=0.6, linewidth=1, label='收盤價')
         ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='月線')
         ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='季線')
-        
         ax1.plot(golden.index, golden['MA20'], '^', color='red', markersize=14, markeredgecolor='black', label='黃金交叉')
         ax1.plot(death.index, death['MA20'], 'v', color='green', markersize=14, markeredgecolor='black', label='死亡交叉')
         ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=my_font, fontweight='bold')
         ax1.legend(loc='upper left', prop=my_font)
         ax1.grid(True, linestyle=':', alpha=0.5)
 
-        # 副圖1：成交量
         colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         ax2.bar(df.index, df['Volume'], color=colors, alpha=0.8)
         ax2.plot(df.index, df['Vol_MA20'], color='blue', linewidth=1.5, label='20日均量')
@@ -427,7 +434,6 @@ def create_stock_chart(stock_code):
         ax2.legend(loc='upper right', prop=my_font)
         ax2.grid(True, linestyle=':', alpha=0.3)
 
-        # 副圖2：RSI
         ax3.plot(df.index, df['RSI'], color='purple', linewidth=1.5, label='RSI')
         ax3.axhline(80, color='red', linestyle='--', alpha=0.5)
         ax3.axhline(60, color='orange', linestyle='--', alpha=0.5)
@@ -449,13 +455,12 @@ def create_stock_chart(stock_code):
         print(f"繪圖錯誤: {e}")
         return None, str(e)
 
-# --- 5. 核心功能 B: 智能選股 (v4.1 嚴格濾網 - 含ADX Proxy) ---
+# --- 5. 核心功能 B: 智能選股 (v4.1 RS排名制) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_stocks = set()
         for s_list in SECTOR_DICT.values():
-            for s in s_list:
-                all_stocks.add(s)
+            for s in s_list: all_stocks.add(s)
         watch_list = random.sample(list(all_stocks), min(30, len(all_stocks)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
@@ -473,24 +478,19 @@ def scan_potential_stocks(max_price=None, sector_name=None):
         title_prefix = "【全市場】"
 
     recommendations = []
-    
+    candidates = [] # 暫存候選名單，用於 RS 排名
+
     try:
-        # 抓取大盤作為基準
         try:
             bench_ticker = yf.Ticker("0050.TW")
             bench_df = fetch_data_with_retry(bench_ticker, period="3mo")
-            if not bench_df.empty:
-                bench_ret = bench_df['Close'].pct_change(20).iloc[-1]
-            else:
-                bench_ret = 0
+            bench_ret = bench_df['Close'].pct_change(20).iloc[-1] if not bench_df.empty else 0
         except:
             bench_ret = 0
 
         # 分批抓取
         data = yf.download(watch_list, period="3mo", progress=False)
-        
-        if data.empty:
-             return [f"系統繁忙 (Yahoo 限流)，請稍後再試。"]
+        if data.empty: return [f"系統繁忙 (Yahoo 限流)，請稍後再試。"]
 
         for stock in watch_list:
             try:
@@ -519,67 +519,73 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 if len(closes) < 60: continue
                 current_price = closes.iloc[-1]
                 
-                if max_price is not None and current_price > max_price:
-                    continue
+                if max_price is not None and current_price > max_price: continue
                 
-                # 計算指標
                 ma20 = closes.rolling(20).mean()
                 ma60 = closes.rolling(60).mean()
                 vol_ma20 = volumes.rolling(20).mean()
                 
-                # 最新數據
                 curr_ma20 = ma20.iloc[-1]
                 curr_ma60 = ma60.iloc[-1]
                 ma20_slope = ma20.diff(5).iloc[-1]
                 vol_ratio = volumes.iloc[-1] / vol_ma20.iloc[-1] if vol_ma20.iloc[-1] > 0 else 0
                 
-                # ADX Proxy (快速過濾盤整)
-                # 使用 |MA20斜率| / 現價，若過小代表趨勢不明顯
                 adx_proxy = abs(ma20_slope) / current_price if current_price > 0 else 0
-                
-                # RS 計算
                 stock_ret = closes.pct_change(20).iloc[-1]
                 rs_val = (1 + stock_ret) / (1 + bench_ret) if bench_ret != 0 else 1.0
 
-                # ATR 計算 (14日)
                 tr1 = highs - lows
                 tr2 = abs(highs - closes.shift(1))
                 tr3 = abs(lows - closes.shift(1))
                 tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
                 atr = tr.rolling(14).mean().iloc[-1]
+                if np.isnan(atr) or atr <= 0: atr = current_price * 0.02 # 防呆
 
-                # --- 嚴格實戰篩選條件 (v4.1) ---
-                # 1. 均線多頭 (月 > 季) 且 趨勢向上 (斜率 > 0)
-                # 2. ADX Proxy > 0.002 (過濾假趨勢/盤整)
-                # 3. RS > 1.03 (明顯強於大盤)
-                # 4. 有量 (量比 > 1.2)
-                
+                # 初步濾網：多頭 + 有量 + 非盤整
                 if (curr_ma20 > curr_ma60 and 
                     ma20_slope > 0 and 
                     adx_proxy > 0.002 and 
-                    rs_val > 1.03 and 
                     vol_ratio > 1.2):
-                        
-                        # R值風控
-                        stop_loss = current_price - (atr * 1.5)
-                        target_price = current_price + (atr * 3)
-                        
-                        stock_name = get_stock_name(stock)
-                        
-                        info = (
-                            f"📌 {stock_name} ({stock.replace('.TW','').replace('.TWO','')})\n"
-                            f"💰 現價: {current_price:.1f} | RS: {rs_val:.2f}\n"
-                            f"🎯 目標: {target_price:.1f}\n"
-                            f"🛑 停損: {stop_loss:.1f}"
-                        )
-                        recommendations.append(info)
-            except Exception: continue
+                    
+                    # 暫存候選資料
+                    candidates.append({
+                        'stock': stock,
+                        'price': current_price,
+                        'rs': rs_val,
+                        'atr': atr,
+                        'vol_ratio': vol_ratio
+                    })
+            except: continue
+        
+        # --- RS 排名制 (v4.1) ---
+        if candidates:
+            # 取出所有候選股的 RS 值
+            rs_list = [c['rs'] for c in candidates]
+            # 計算 PR 70 (前 30% 強)
+            rs_threshold = np.percentile(rs_list, 70)
+            
+            # 只保留 RS >= 門檻的強勢股
+            final_candidates = [c for c in candidates if c['rs'] >= rs_threshold]
+            
+            # 排序：RS 高的在前面
+            final_candidates.sort(key=lambda x: x['rs'], reverse=True)
+            
+            for c in final_candidates:
+                stop_loss = c['price'] - (c['atr'] * 1.5)
+                target_price = c['price'] + (c['atr'] * 3)
+                stock_name = get_stock_name(c['stock'])
+                
+                info = (
+                    f"📌 {stock_name} ({c['stock'].replace('.TW','').replace('.TWO','')})\n"
+                    f"💰 現價: {c['price']:.1f} | RS: {c['rs']:.2f}\n"
+                    f"🎯 目標: {target_price:.1f}\n"
+                    f"🛑 停損: {stop_loss:.1f}"
+                )
+                recommendations.append(info)
+
     except Exception as e:
         return [f"掃描錯誤: {str(e)}"]
     
-    if sector_name == "隨機":
-        random.shuffle(recommendations)
-
     return title_prefix, recommendations[:6]
 
 # --- 6. Flask 路由設定 ---
@@ -655,11 +661,11 @@ def handle_message(event):
         title = f"📊 {title_prefix}潛力股交易計畫"
         
         if results:
-            reply_text = f"{title}\n(嚴選趨勢+RS+ATR，非投資建議)\n====================\n"
+            reply_text = f"{title}\n(嚴選趨勢+RS前30%強，非投資建議)\n====================\n"
             reply_text += "\n\n".join(results)
-            reply_text += "\n====================\n💡 建議：RS>1.03代表強於大盤，勝率較高。"
+            reply_text += "\n====================\n💡 建議：只操作RS排名靠前的股票，勝率較高。"
         else:
-            reply_text = f"目前{sector_hit}板塊無符合「強勢多頭+強於大盤」條件的個股，建議觀望。"
+            reply_text = f"目前{sector_hit}板塊無符合「強勢多頭+RS強勢」條件的個股，建議觀望。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif user_msg == "百元推薦":
