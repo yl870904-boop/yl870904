@@ -14,7 +14,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v4.0.0 (2025-12-26) - 實戰策略版 (ADX/RS/ATR/OBV)"
+APP_VERSION = "v4.1 職業級交易系統 (Trend + RS + ATR)"
 
 # --- 設定 matplotlib 後端 (無介面模式) ---
 matplotlib.use('Agg')
@@ -154,28 +154,34 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 輔助計算函數 ---
+# --- 輔助計算函數 (修正版) ---
 def calculate_adx(df, window=14):
-    """計算 ADX (Average Directional Index)"""
+    """計算 ADX (使用標準 +DM/-DM 邏輯修正)"""
     try:
         high = df['High']
         low = df['Low']
         close = df['Close']
         
-        plus_dm = high.diff()
-        minus_dm = low.diff()
-        plus_dm[plus_dm < 0] = 0
-        minus_dm[minus_dm > 0] = 0
+        # 修正：標準 ADX 計算邏輯
+        up_move = high.diff()
+        down_move = -low.diff()
         
-        tr1 = pd.DataFrame(high - low)
-        tr2 = pd.DataFrame(abs(high - close.shift(1)))
-        tr3 = pd.DataFrame(abs(low - close.shift(1)))
-        frames = [tr1, tr2, tr3]
-        tr = pd.concat(frames, axis=1, join='outer').max(axis=1)
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
         atr = tr.rolling(window).mean()
         
-        plus_di = 100 * (plus_dm.ewm(alpha=1/window).mean() / atr)
-        minus_di = 100 * (abs(minus_dm).ewm(alpha=1/window).mean() / atr)
+        plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
+        
         dx = (abs(plus_di - minus_di) / abs(plus_di + minus_di)) * 100
         adx = dx.rolling(window).mean()
         return adx
@@ -220,7 +226,7 @@ def fetch_data_with_retry(ticker, period="1y", retries=3, delay=2):
                 raise e
     return pd.DataFrame()
 
-# --- 4. 核心功能 A: 繪圖引擎 (v4.0 實戰升級) ---
+# --- 4. 核心功能 A: 繪圖引擎 (v4.1 職業級升級) ---
 def create_stock_chart(stock_code):
     try:
         raw_code = stock_code.upper().strip()
@@ -314,7 +320,7 @@ def create_stock_chart(stock_code):
         atr = df['ATR'].iloc[-1]
         rs_val = df['RS'].iloc[-1]
         
-        # --- 策略分析邏輯 (v4.0 升級版) ---
+        # --- 策略分析邏輯 (v4.1 升級版) ---
         
         # A. 趨勢品質 (ADX)
         if adx < 20:
@@ -340,15 +346,31 @@ def create_stock_chart(stock_code):
         elif rs_val < 0.95: rs_str = "弱於大盤 (遭提款) 🐢"
         else: rs_str = "跟隨大盤"
 
-        # D. R值風控 (ATR)
-        # 停損：多頭時為 現價 - 1.5*ATR (或月線取低者保險)
-        # 這裡採用 ATR 動態停損
+        # D. R值風控 (ATR + 移動停損)
+        # 停損：多頭時為 現價 - 1.5*ATR (或月線取高者保險 - 移動停損概念)
         atr_stop_loss = current_price - (atr * 1.5)
-        # 如果月線比較近，用月線當支撐參考
-        final_stop = max(atr_stop_loss, ma20 * 0.98) if trend_dir == "多頭" else atr_stop_loss
+        
+        if trend_dir == "多頭":
+            # 如果月線目前低於現價，則把月線也納入考量，取較高者保護獲利
+            if ma20 < current_price:
+                final_stop = max(atr_stop_loss, ma20)
+            else:
+                final_stop = atr_stop_loss
+        else:
+            final_stop = atr_stop_loss
         
         # 目標：現價 + 3*ATR (期望值)
         target_price = current_price + (atr * 3)
+
+        # OBV 背離檢查 (價格創高但 OBV 沒創高)
+        obv_warning = ""
+        try:
+            price_trend = df['Close'].iloc[-1] > df['Close'].iloc[-10]
+            obv_trend = df['OBV'].iloc[-1] < df['OBV'].iloc[-10]
+            if price_trend and obv_trend:
+                obv_warning = " (⚠️價漲量縮，留意背離)"
+        except:
+            pass
 
         # E. 綜合診斷
         advice = "觀望"
@@ -358,13 +380,13 @@ def create_stock_chart(stock_code):
             elif rs_val < 1:
                 advice = "個股趨勢雖好但跑輸大盤，補漲或假突破留意"
             elif vol_ratio > 3:
-                advice = "短線爆量過熱，OBV未創高小心出貨"
+                advice = "短線爆量過熱" + obv_warning
             elif 60 <= rsi <= 75:
                 advice = "量價健康，趨勢強勁，R值漂亮可佈局"
             elif rsi > 80:
                 advice = "乖離過大，隨時回檔，勿追高"
             else:
-                advice = "沿月線操作，跌破ATR停損出場"
+                advice = "沿月線操作，跌破ATR停損出場" + obv_warning
         elif trend_dir == "空頭":
             advice = "趨勢向下，反彈皆是逃命波"
         else:
@@ -376,9 +398,10 @@ def create_stock_chart(stock_code):
             f"📈 趨勢: {trend_dir} | {trend_quality}\n"
             f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
             f"🌊 動能: 量比 {vol_ratio:.1f}\n"
+            f"⚡ RSI: {rsi:.1f}\n"
             f"------------------\n"
             f"🎯 目標價: {target_price:.1f} (ATR*3)\n"
-            f"🛑 停損點: {final_stop:.1f} (ATR*1.5)\n"
+            f"🛑 停損點: {final_stop:.1f} (ATR/月線)\n"
             f"💡 建議: {advice}"
         )
 
@@ -426,7 +449,7 @@ def create_stock_chart(stock_code):
         print(f"繪圖錯誤: {e}")
         return None, str(e)
 
-# --- 5. 核心功能 B: 智能選股 (v4.0 嚴格濾網) ---
+# --- 5. 核心功能 B: 智能選股 (v4.1 嚴格濾網 - 含ADX Proxy) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_stocks = set()
@@ -452,7 +475,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
     recommendations = []
     
     try:
-        # 抓取大盤作為基準 (為了計算 RS)
+        # 抓取大盤作為基準
         try:
             bench_ticker = yf.Ticker("0050.TW")
             bench_df = fetch_data_with_retry(bench_ticker, period="3mo")
@@ -463,7 +486,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
         except:
             bench_ret = 0
 
-        # 分批抓取 (避免 timeout)
+        # 分批抓取
         data = yf.download(watch_list, period="3mo", progress=False)
         
         if data.empty:
@@ -504,14 +527,15 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 ma60 = closes.rolling(60).mean()
                 vol_ma20 = volumes.rolling(20).mean()
                 
-                # ADX 簡易計算 (需要 High/Low)
-                # 這裡簡化計算，若無法算 ADX 則略過濾網
-                
                 # 最新數據
                 curr_ma20 = ma20.iloc[-1]
                 curr_ma60 = ma60.iloc[-1]
                 ma20_slope = ma20.diff(5).iloc[-1]
                 vol_ratio = volumes.iloc[-1] / vol_ma20.iloc[-1] if vol_ma20.iloc[-1] > 0 else 0
+                
+                # ADX Proxy (快速過濾盤整)
+                # 使用 |MA20斜率| / 現價，若過小代表趨勢不明顯
+                adx_proxy = abs(ma20_slope) / current_price if current_price > 0 else 0
                 
                 # RS 計算
                 stock_ret = closes.pct_change(20).iloc[-1]
@@ -524,16 +548,16 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
                 atr = tr.rolling(14).mean().iloc[-1]
 
-                # --- 嚴格實戰篩選條件 (v4.0) ---
+                # --- 嚴格實戰篩選條件 (v4.1) ---
                 # 1. 均線多頭 (月 > 季) 且 趨勢向上 (斜率 > 0)
-                # 2. 股價站穩月線
-                # 3. RS > 1 (強於大盤)
+                # 2. ADX Proxy > 0.002 (過濾假趨勢/盤整)
+                # 3. RS > 1.03 (明顯強於大盤)
                 # 4. 有量 (量比 > 1.2)
                 
                 if (curr_ma20 > curr_ma60 and 
                     ma20_slope > 0 and 
-                    current_price > curr_ma20 and 
-                    rs_val > 1.0 and 
+                    adx_proxy > 0.002 and 
+                    rs_val > 1.03 and 
                     vol_ratio > 1.2):
                         
                         # R值風控
@@ -633,7 +657,7 @@ def handle_message(event):
         if results:
             reply_text = f"{title}\n(嚴選趨勢+RS+ATR，非投資建議)\n====================\n"
             reply_text += "\n\n".join(results)
-            reply_text += "\n====================\n💡 建議：RS>1代表強於大盤，勝率較高。"
+            reply_text += "\n====================\n💡 建議：RS>1.03代表強於大盤，勝率較高。"
         else:
             reply_text = f"目前{sector_hit}板塊無符合「強勢多頭+強於大盤」條件的個股，建議觀望。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
