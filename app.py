@@ -14,14 +14,14 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v2.3.0 (2025-12-24) - 新增自動重試機制與防限流優化"
+APP_VERSION = "v3.0.0 (2025-12-25) - 實戰操盤版 (量價結構/R值風控)"
 
 # --- 設定 matplotlib 後端 (無介面模式) ---
 matplotlib.use('Agg')
 
 app = Flask(__name__)
 
-# --- 1. 設定密鑰 (Render 環境變數優先，找不到則使用預設值) ---
+# --- 1. 設定密鑰 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '(REMOVED_LINE_TOKEN)')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '(REMOVED_LINE_SECRET)')
 
@@ -34,7 +34,6 @@ if not os.path.exists(static_dir):
     os.makedirs(static_dir)
 
 font_file = 'TaipeiSansTCBeta-Regular.ttf'
-# 如果本地沒有字型檔，嘗試下載 (防呆機制)
 if not os.path.exists(font_file):
     print("找不到字型檔，正在下載...")
     import urllib.request
@@ -43,10 +42,9 @@ if not os.path.exists(font_file):
 
 my_font = FontProperties(fname=font_file)
 
-# --- 3. 定義產業板塊資料庫 (大幅擴充版) ---
-# 包含圖片中的熱門分類
+# --- 3. 定義產業板塊資料庫 ---
 SECTOR_DICT = {
-    # ★ 50檔百元內績優股 (混合電子、傳產、金融、ETF)
+    # ★ 50檔百元內績優股
     "百元績優": [
         '2303.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '2409.TW', '3481.TW', 
         '2408.TW', '2344.TW', '2337.TW', '3702.TW', '2312.TW', '6282.TW', '3260.TWO', 
@@ -57,44 +55,6 @@ SECTOR_DICT = {
         '2105.TW', '2618.TW', '2610.TW', '9945.TW', '2542.TW',
         '00878.TW', '0056.TW', '00929.TW', '00919.TW'
     ],
-
-    # 電子與科技
-    "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
-    "電子": ['2317.TW', '2382.TW', '3231.TW', '2353.TW', '2357.TW', '2324.TW', '2301.TW', '2356.TW'],
-    "光電": ['3008.TW', '3406.TW', '2409.TW', '3481.TW', '6706.TW', '2340.TW'],
-    "網通": ['2345.TW', '5388.TWO', '2332.TW', '3704.TW', '3596.TWO', '6285.TW'],
-    "電零組": ['2308.TW', '2313.TW', '3037.TW', '2383.TW', '2368.TW', '3044.TW'],
-    "電腦週邊": ['2357.TW', '2324.TW', '3231.TW', '2382.TW', '2301.TW', '2376.TW'],
-    "資訊服務": ['2471.TW', '3029.TW', '3130.TWO', '6214.TW'],
-    
-    # 傳產與民生
-    "航運": ['2603.TW', '2609.TW', '2615.TW', '2618.TW', '2610.TW', '2637.TW', '2606.TW'],
-    "鋼鐵": ['2002.TW', '2014.TW', '2027.TW', '2006.TW', '2031.TW', '2009.TW'],
-    "塑膠": ['1301.TW', '1303.TW', '1326.TW', '1304.TW', '1308.TW'],
-    "紡織": ['1402.TW', '1476.TW', '1477.TW', '1409.TW', '1440.TW'],
-    "電機": ['1503.TW', '1504.TW', '1513.TW', '1519.TW', '1514.TW'],
-    "電纜": ['1605.TW', '1609.TW', '1608.TW', '1618.TW'],
-    "水泥": ['1101.TW', '1102.TW', '1108.TW', '1110.TW'],
-    "玻璃": ['1802.TW', '1809.TW', '1806.TW'],
-    "造紙": ['1904.TW', '1907.TW', '1909.TW', '1906.TW'],
-    "橡膠": ['2105.TW', '2103.TW', '2106.TW', '2104.TW'],
-    "汽車": ['2207.TW', '2201.TW', '2204.TW', '1319.TW', '2227.TW'],
-    "食品": ['1216.TW', '1210.TW', '1227.TW', '1201.TW', '1215.TW'],
-    "營建": ['2501.TW', '2542.TW', '5522.TW', '2548.TW', '2520.TW', '2538.TW'],
-    "觀光": ['2707.TW', '2727.TW', '2723.TW', '5706.TWO', '2704.TW'],
-    
-    # 金融與生技
-    "金融": ['2881.TW', '2882.TW', '2886.TW', '2891.TW', '2892.TW', '2884.TW', '5880.TW', '2880.TW', '2885.TW'],
-    "銀行": ['2881.TW', '2882.TW', '2886.TW', '2891.TW', '2892.TW', '2884.TW', '5880.TW'],
-    "生技": ['6446.TW', '1795.TW', '4128.TWO', '1760.TW', '4114.TWO', '4743.TWO', '3176.TWO'],
-    "化學": ['1722.TW', '1708.TW', '1710.TW', '1717.TW'],
-
-    # 題材與其他
-    "軍工": ['2634.TW', '8033.TWO', '5284.TWO', '3005.TW', '8222.TWO'],
-    "AI": ['3231.TW', '2382.TW', '6669.TW', '2376.TW', '2356.TW', '3017.TW'],
-    "ETN": ['020020.TW', '020019.TW'],
-    "ETF": ['0050.TW', '0056.TW', '00878.TW', '00929.TW', '00919.TW', '006208.TW'],
-
     # 熱門集團股
     "台積電集團": ['2330.TW', '5347.TWO', '3443.TW', '3374.TW', '3661.TW', '3105.TWO'],
     "鴻海集團": ['2317.TW', '2328.TW', '2354.TW', '6414.TW', '5243.TW', '3413.TW', '6451.TW'],
@@ -112,9 +72,37 @@ SECTOR_DICT = {
     "大同集團": ['2371.TW', '2313.TW', '3519.TW', '8081.TW'],
     "聯華神通集團": ['1229.TW', '2347.TW', '3702.TW', '3005.TW'],
     "友達集團": ['2409.TW', '4960.TW', '6120.TWO'],
+    # 產業
+    "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
+    "電子": ['2317.TW', '2382.TW', '3231.TW', '2353.TW', '2357.TW', '2324.TW', '2301.TW', '2356.TW'],
+    "光電": ['3008.TW', '3406.TW', '2409.TW', '3481.TW', '6706.TW', '2340.TW'],
+    "網通": ['2345.TW', '5388.TWO', '2332.TW', '3704.TW', '3596.TWO', '6285.TW'],
+    "電零組": ['2308.TW', '2313.TW', '3037.TW', '2383.TW', '2368.TW', '3044.TW'],
+    "電腦週邊": ['2357.TW', '2324.TW', '3231.TW', '2382.TW', '2301.TW', '2376.TW'],
+    "資訊服務": ['2471.TW', '3029.TW', '3130.TWO', '6214.TW'],
+    "航運": ['2603.TW', '2609.TW', '2615.TW', '2618.TW', '2610.TW', '2637.TW', '2606.TW'],
+    "鋼鐵": ['2002.TW', '2014.TW', '2027.TW', '2006.TW', '2031.TW', '2009.TW'],
+    "塑膠": ['1301.TW', '1303.TW', '1326.TW', '1304.TW', '1308.TW'],
+    "紡織": ['1402.TW', '1476.TW', '1477.TW', '1409.TW', '1440.TW'],
+    "電機": ['1503.TW', '1504.TW', '1513.TW', '1519.TW', '1514.TW'],
+    "電纜": ['1605.TW', '1609.TW', '1608.TW', '1618.TW'],
+    "水泥": ['1101.TW', '1102.TW', '1108.TW', '1110.TW'],
+    "玻璃": ['1802.TW', '1809.TW', '1806.TW'],
+    "造紙": ['1904.TW', '1907.TW', '1909.TW', '1906.TW'],
+    "橡膠": ['2105.TW', '2103.TW', '2106.TW', '2104.TW'],
+    "汽車": ['2207.TW', '2201.TW', '2204.TW', '1319.TW', '2227.TW'],
+    "食品": ['1216.TW', '1210.TW', '1227.TW', '1201.TW', '1215.TW'],
+    "營建": ['2501.TW', '2542.TW', '5522.TW', '2548.TW', '2520.TW', '2538.TW'],
+    "觀光": ['2707.TW', '2727.TW', '2723.TW', '5706.TWO', '2704.TW'],
+    "金融": ['2881.TW', '2882.TW', '2886.TW', '2891.TW', '2892.TW', '2884.TW', '5880.TW', '2880.TW', '2885.TW'],
+    "生技": ['6446.TW', '1795.TW', '4128.TWO', '1760.TW', '4114.TWO', '4743.TWO', '3176.TWO'],
+    "化學": ['1722.TW', '1708.TW', '1710.TW', '1717.TW'],
+    "軍工": ['2634.TW', '8033.TWO', '5284.TWO', '3005.TW', '8222.TWO'],
+    "AI": ['3231.TW', '2382.TW', '6669.TW', '2376.TW', '2356.TW', '3017.TW'],
+    "ETF": ['0050.TW', '0056.TW', '00878.TW', '00929.TW', '00919.TW', '006208.TW'],
 }
 
-# --- 股票代號名稱對照表 (確保顯示中文) ---
+# --- 股票代號名稱對照表 (手動維護) ---
 CODE_NAME_MAP = {
     '2330': '台積電', '2454': '聯發科', '2303': '聯電', '3711': '日月光', '3034': '聯詠', '2379': '瑞昱', '3443': '創意', '3035': '智原', '3661': '世芯',
     '2317': '鴻海', '2382': '廣達', '3231': '緯創', '2353': '宏碁', '2357': '華碩', '2324': '仁寶', '2301': '光寶科', '2356': '英業達',
@@ -163,153 +151,175 @@ CODE_NAME_MAP = {
 }
 
 def get_stock_name(stock_code):
-    # 移除 .TW 或 .TWO 取得純代號
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 關鍵修正：具備重試機制的資料抓取函數 ---
 def fetch_data_with_retry(ticker, period="1y", retries=3, delay=2):
-    """
-    抓取資料並在遇到 Rate Limit 時自動重試
-    """
     for i in range(retries):
         try:
             df = ticker.history(period=period)
             if not df.empty:
                 return df
-            # 如果回傳空值，但不一定是錯誤，可能是沒資料，但這裡我們先當作沒抓到
             time.sleep(0.5) 
         except Exception as e:
             error_str = str(e)
             if "Too Many Requests" in error_str or "429" in error_str:
-                print(f"⚠️ 觸發 Yahoo 限流 ({ticker.ticker})，等待 {delay} 秒後重試 ({i+1}/{retries})...")
-                time.sleep(delay * (i + 1)) # 指數退避，每次等久一點
+                time.sleep(delay * (i + 1))
             else:
-                # 如果是其他錯誤 (如代號不存在)，就直接拋出
                 raise e
-    return pd.DataFrame() # 重試失敗回傳空
+    return pd.DataFrame()
 
-# --- 4. 核心功能 A: 繪圖引擎 (使用重試機制) ---
+# --- 4. 核心功能 A: 繪圖引擎 (實戰升級版) ---
 def create_stock_chart(stock_code):
     try:
         raw_code = stock_code.upper().strip()
-        
-        # 1. 建立 Ticker 物件 (這裡還不會發送請求)
         if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
             target = raw_code
             ticker = yf.Ticker(target)
         else:
-            # 預設先試上市
             target = raw_code + ".TW"
             ticker = yf.Ticker(target)
         
-        # 2. 抓取資料 (使用重試機制)
         df = fetch_data_with_retry(ticker, period="1y")
         
-        # 3. 如果上市抓不到，嘗試切換到上櫃
         if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
             target_two = raw_code + ".TWO"
             ticker_two = yf.Ticker(target_two)
             df = fetch_data_with_retry(ticker_two, period="1y")
             if not df.empty:
                 target = target_two
-                ticker = ticker_two # 更新 ticker 物件
+                ticker = ticker_two
 
         if df.empty: 
             return None, "系統繁忙 (Yahoo 限流) 或 找不到該代號資料，請稍後再試。"
         
-        # 取得個股中文名稱
         stock_name = get_stock_name(target)
 
-        # 嘗試取得 EPS (EPS 資訊請求也可能失敗，但不應影響畫圖)
+        # 嘗試取得 EPS
         try:
             stock_info = ticker.info
             eps = stock_info.get('trailingEps', None)
-            if eps is None:
-                eps = stock_info.get('forwardEps', 'N/A')
+            if eps is None: eps = stock_info.get('forwardEps', 'N/A')
         except:
             eps = 'N/A'
 
-        # 計算指標
+        # --- 技術指標計算 ---
+        # 1. 均線
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['MA60'] = df['Close'].rolling(window=60).mean()
+        
+        # 2. 均線斜率 (趨勢角度) - 關鍵指標
+        # 取 5 天前的 MA20 來比較，正值代表上揚
+        df['MA20_Slope'] = df['MA20'].diff(5)
+        
+        # 3. 布林通道 (輔助參考)
         std = df['Close'].rolling(window=20).std()
         df['Upper'] = df['MA20'] + (2 * std)
         df['Lower'] = df['MA20'] - (2 * std)
         
-        # RSI 計算
+        # 4. RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # 訊號
+        # 5. 成交量結構 (關鍵指標)
+        # 計算 20 日均量
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+        # 量能比：今日量 / 均量 ( > 1 代表出量)
+        df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
+
+        # --- 訊號判斷 ---
         df['Signal'] = np.where(df['MA20'] > df['MA60'], 1.0, 0.0)
         df['Position'] = df['Signal'].diff()
         golden = df[df['Position'] == 1.0]
         death = df[df['Position'] == -1.0]
 
-        # --- 生成個股分析報告 ---
+        # --- 取得最新數據 ---
         current_price = df['Close'].iloc[-1]
         ma20 = df['MA20'].iloc[-1]
         ma60 = df['MA60'].iloc[-1]
-        upper_band = df['Upper'].iloc[-1]
+        ma20_slope = df['MA20_Slope'].iloc[-1]
         rsi = df['RSI'].iloc[-1]
+        vol_ratio = df['Vol_Ratio'].iloc[-1]
         
-        # 1. 判斷趨勢
+        # --- 策略分析邏輯 (實戰版) ---
+        
+        # A. 趨勢判斷 (均線 + 斜率)
         if ma20 > ma60:
-            trend_str = "多頭排列 (強勢) 🔥"
-            trend_score = 1
+            if ma20_slope > 0:
+                trend_str = "多頭攻擊 (強) 🔥"
+                trend_score = 2
+            else:
+                trend_str = "多頭休息 (盤) ⏸️"
+                trend_score = 1
         else:
-            trend_str = "空頭排列 (弱勢) ❄️"
-            trend_score = -1
-            
-        # 2. 判斷 RSI 狀態
-        if rsi > 75:
-            rsi_str = f"{rsi:.1f} (過熱 ⚠️)"
-        elif rsi < 25:
-            rsi_str = f"{rsi:.1f} (超賣 🟢)"
-        else:
-            rsi_str = f"{rsi:.1f} (中性)"
+            if ma20_slope > 0:
+                trend_str = "空頭反彈 (彈) ⤴️"
+                trend_score = 0
+            else:
+                trend_str = "空頭下跌 (弱) ❄️"
+                trend_score = -1
 
-        # 3. 計算目標價與停損點
-        if trend_score == 1:
-            target_price = max(upper_band, current_price * 1.05)
-            stop_loss = ma20 if current_price > ma20 else current_price * 0.95
+        # B. 籌碼動能 (成交量)
+        if vol_ratio > 2.5:
+            vol_str = "爆量 (警戒)"
+        elif vol_ratio > 1.2:
+            vol_str = "溫和放量 (佳)"
+        elif vol_ratio < 0.8:
+            vol_str = "量縮 (人氣散)"
         else:
-            target_price = ma60 # 空頭時季線是壓力
+            vol_str = "正常"
+
+        # C. RSI 趨勢解讀
+        if trend_score >= 1: # 多頭架構下
+            if 60 <= rsi <= 75: rsi_str = f"{rsi:.1f} (強勢區 ✅)"
+            elif rsi > 80: rsi_str = f"{rsi:.1f} (過熱警戒 ⚠️)"
+            else: rsi_str = f"{rsi:.1f} (蓄勢)"
+        else: # 空頭架構下
+            if rsi < 30: rsi_str = f"{rsi:.1f} (乖離過大)"
+            elif rsi > 60: rsi_str = f"{rsi:.1f} (反彈無力)"
+            else: rsi_str = f"{rsi:.1f} (弱勢)"
+
+        # D. R值風控運算 (目標價與停損)
+        # 停損：月線 (若股價已破月線，則設為現價95%)
+        if current_price > ma20:
+            stop_loss = ma20
+        else:
             stop_loss = current_price * 0.95
-
-        # 4. 給予長短線建議
-        short_term_advice = "觀望"
-        if trend_score == 1:
-            if rsi < 70: short_term_advice = "沿月線操作，拉回可接"
-            else: short_term_advice = "乖離過大，勿追高，防回檔"
-        else:
-            if rsi < 30: short_term_advice = "有反彈契機，搶短手腳要快"
-            else: short_term_advice = "趨勢向下，反彈至月線減碼"
-
-        long_term_advice = "中立"
-        eps_val = float(eps) if eps != 'N/A' else 0
         
-        if current_price > ma60:
-            if eps_val > 0: long_term_advice = "基本面有撐，站穩季線續抱"
-            else: long_term_advice = "無獲利支撐，僅視為題材炒作"
-        else:
-            if eps_val > 0: long_term_advice = "股價委屈，待站回季線轉強"
-            else: long_term_advice = "獲利衰退且破季線，避開為妙"
+        # 風險 = 現價 - 停損
+        risk = current_price - stop_loss
+        if risk < 0: risk = current_price * 0.05 # 防呆
+        
+        # 目標 = 現價 + 2倍風險 (期望值 > 2)
+        target_price = current_price + (risk * 2)
+
+        # E. 綜合建議
+        advice = "觀望"
+        if trend_score == 2: # 強勢多頭
+            if vol_ratio > 3: advice = "短線爆量，小心主力出貨"
+            elif 1.2 <= vol_ratio <= 2.5: advice = "量價配合完美，持股續抱"
+            elif rsi > 80: advice = "指標過熱，隨時準備獲利"
+            else: advice = "趨勢向上，沿月線操作"
+        elif trend_score == 1: # 多頭整理
+            advice = "均線走平，等待帶量突破再進場"
+        elif trend_score == 0: # 反彈
+            advice = "搶反彈手腳要快，嚴設停損"
+        else: # 空頭
+            advice = "趨勢向下，勿隨意接刀"
 
         analysis_report = (
-            f"📊 {stock_name} ({target}) 診斷報告\n"
+            f"📊 {stock_name} ({target}) 實戰診斷\n"
             f"💰 現價: {current_price:.1f} | EPS: {eps}\n"
             f"📈 趨勢: {trend_str}\n"
+            f"🌊 動能: {vol_str} (比率:{vol_ratio:.1f})\n"
             f"⚡ RSI: {rsi_str}\n"
             f"------------------\n"
-            f"🎯 目標價: {target_price:.1f}\n"
-            f"🛑 停損點: {stop_loss:.1f}\n"
-            f"💡 短線: {short_term_advice}\n"
-            f"🔭 長線: {long_term_advice}"
+            f"🎯 目標價: {target_price:.1f} (R值 2.0)\n"
+            f"🛑 停損點: {stop_loss:.1f} (月線支撐)\n"
+            f"💡 建議: {advice}"
         )
 
         # --- 開始繪圖 ---
@@ -319,25 +329,29 @@ def create_stock_chart(stock_code):
         ax1.plot(df.index, df['Close'], color='black', alpha=0.6, linewidth=1, label='收盤價')
         ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='月線')
         ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='季線')
-        ax1.fill_between(df.index, df['Upper'], df['Lower'], color='skyblue', alpha=0.2)
+        # 改畫布林為參考
+        ax1.fill_between(df.index, df['Upper'], df['Lower'], color='gray', alpha=0.1)
+        
         ax1.plot(golden.index, golden['MA20'], '^', color='red', markersize=14, markeredgecolor='black', label='黃金交叉')
         ax1.plot(death.index, death['MA20'], 'v', color='green', markersize=14, markeredgecolor='black', label='死亡交叉')
-        
-        # 標題加入中文名稱
-        ax1.set_title(f"{stock_name} ({target}) 專業分析圖", fontsize=22, fontproperties=my_font, fontweight='bold')
-        
+        ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=my_font, fontweight='bold')
         ax1.legend(loc='upper left', prop=my_font)
         ax1.grid(True, linestyle=':', alpha=0.5)
 
-        # 副圖1：成交量
+        # 副圖1：成交量 + 均量線
         colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         ax2.bar(df.index, df['Volume'], color=colors, alpha=0.8)
+        # 加上 20日均量線
+        ax2.plot(df.index, df['Vol_MA20'], color='blue', linewidth=1.5, label='20日均量')
+        
         ax2.set_ylabel("成交量", fontproperties=my_font)
+        ax2.legend(loc='upper right', prop=my_font)
         ax2.grid(True, linestyle=':', alpha=0.3)
 
         # 副圖2：RSI
         ax3.plot(df.index, df['RSI'], color='purple', linewidth=1.5, label='RSI')
-        ax3.axhline(70, color='red', linestyle='--', alpha=0.5)
+        ax3.axhline(80, color='red', linestyle='--', alpha=0.5) # 改為 80 警戒
+        ax3.axhline(60, color='orange', linestyle='--', alpha=0.5) # 強勢區下緣
         ax3.axhline(30, color='green', linestyle='--', alpha=0.5)
         ax3.set_ylabel("RSI", fontproperties=my_font)
         ax3.grid(True, linestyle=':', alpha=0.3)
@@ -356,7 +370,7 @@ def create_stock_chart(stock_code):
         print(f"繪圖錯誤: {e}")
         return None, str(e)
 
-# --- 5. 核心功能 B: 智能選股 (支援多板塊與隨機，優化批量下載) ---
+# --- 5. 核心功能 B: 智能選股 (實戰濾網升級) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     # 決定要掃描的清單
     if sector_name == "隨機":
@@ -382,27 +396,29 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
     recommendations = []
     
-    # 批量下載 (使用 yf.download)
-    # yfinance 的批量下載如果其中一支失敗，通常不會中斷，但如果被限流則會全部失敗
-    # 這裡我們嘗試用 try-except 包裹，如果批量失敗，可以考慮分批或告知使用者
     try:
+        # 批量下載時，增加重試機制較困難，故這裡仍使用單次下載，但加上錯誤處理
+        # 為了避免被鎖，可以考慮分批，但這裡先維持原樣，因 watch_list 通常不大
         data = yf.download(watch_list, period="3mo", progress=False)
         
-        # 檢查是否被限流 (如果 data 是空的)
         if data.empty:
              return [f"系統繁忙 (Yahoo 限流)，請稍後再試。"]
 
         for stock in watch_list:
             try:
-                # 資料提取邏輯 (處理 MultiIndex)
                 if isinstance(data.columns, pd.MultiIndex):
-                    try: closes = data['Close'][stock]
+                    try: 
+                        closes = data['Close'][stock]
+                        volumes = data['Volume'][stock] # 取得成交量
                     except KeyError: continue
                 else:
                     closes = data['Close']
+                    volumes = data['Volume']
                 
                 if isinstance(closes, pd.DataFrame):
-                    if not closes.empty: closes = closes.iloc[:, 0]
+                    if not closes.empty: 
+                        closes = closes.iloc[:, 0]
+                        volumes = volumes.iloc[:, 0]
                     else: continue
                 
                 closes = closes.dropna()
@@ -413,23 +429,51 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 if max_price is not None and current_price > max_price:
                     continue
                 
-                ma20 = closes.rolling(20).mean().iloc[-1]
-                ma60 = closes.rolling(60).mean().iloc[-1]
-                std = closes.rolling(20).std().iloc[-1]
+                # 計算關鍵指標
+                ma20 = closes.rolling(20).mean()
+                ma60 = closes.rolling(60).mean()
+                std = closes.rolling(20).std()
+                vol_ma20 = volumes.rolling(20).mean() # 20日均量
                 
-                # 篩選邏輯：站上月線 且 月線>季線 (多頭)
-                if ma20 > ma60 and current_price > ma20:
-                    bias = (current_price - ma20) / ma20 * 100
-                    if bias < 15: 
-                        stop_loss = ma20 * 0.99
-                        upper_band = ma20 + (2 * std)
-                        target_price = max(upper_band, current_price * 1.05)
+                # 取最新值
+                curr_ma20 = ma20.iloc[-1]
+                curr_ma60 = ma60.iloc[-1]
+                curr_std = std.iloc[-1]
+                curr_vol = volumes.iloc[-1]
+                curr_vol_ma = vol_ma20.iloc[-1]
+                
+                # 計算 MA20 斜率 (diff 5)
+                ma20_slope = ma20.diff(5).iloc[-1]
+                
+                # 計算量能比
+                vol_ratio = curr_vol / curr_vol_ma if curr_vol_ma > 0 else 0
+                
+                # 計算乖離率
+                bias = (current_price - curr_ma20) / curr_ma20 * 100
+
+                # --- 嚴格實戰篩選條件 ---
+                # 1. 均線多頭 (月 > 季)
+                # 2. 月線趨勢向上 (斜率 > 0)
+                # 3. 股價站穩月線 (價 > 月)
+                # 4. 乖離率 < 8% (不追高)
+                # 5. 量能增溫 (比率 > 1.2)
+                
+                if (curr_ma20 > curr_ma60 and 
+                    ma20_slope > 0 and 
+                    current_price > curr_ma20 and 
+                    bias < 8 and 
+                    vol_ratio > 1.2):
+                        
+                        # R值風控計算
+                        stop_loss = curr_ma20 * 0.99
+                        risk = current_price - stop_loss
+                        target_price = current_price + (risk * 2)
                         
                         stock_name = get_stock_name(stock)
                         
                         info = (
                             f"📌 {stock_name} ({stock.replace('.TW','').replace('.TWO','')})\n"
-                            f"💰 現價: {current_price:.1f}\n"
+                            f"💰 現價: {current_price:.1f} | 量比: {vol_ratio:.1f}\n"
                             f"🎯 目標: {target_price:.1f}\n"
                             f"🛑 停損: {stop_loss:.1f}"
                         )
@@ -509,22 +553,20 @@ def handle_message(event):
     # 判斷是否為板塊/集團推薦指令
     sector_hit = None
     for sector in SECTOR_DICT.keys():
-        # 如果使用者輸入 "電子股推薦" 或 "電子推薦"
         if sector in user_msg and ("推薦" in user_msg or "選股" in user_msg):
             sector_hit = sector
             break
     
     if sector_hit:
-        # 執行特定板塊掃描
         title_prefix, results = scan_potential_stocks(max_price=None, sector_name=sector_hit)
         title = f"📊 {title_prefix}潛力股交易計畫"
         
         if results:
-            reply_text = f"{title}\n(EPS可能影響長線判斷，請參考個股分析)\n====================\n"
+            reply_text = f"{title}\n(嚴選趨勢+量能，非投資建議)\n====================\n"
             reply_text += "\n\n".join(results)
-            reply_text += "\n====================\n💡 建議：點擊代號可查看EPS與長短線建議。"
+            reply_text += "\n====================\n💡 建議：點擊代號可查看R值與量能結構。"
         else:
-            reply_text = f"目前{sector_hit}板塊無符合強勢條件的個股，或系統繁忙請稍後再試。"
+            reply_text = f"目前{sector_hit}板塊無符合「強勢多頭+出量」條件的個股，建議觀望。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif user_msg == "百元推薦":
@@ -561,7 +603,6 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         
     else:
-        # 繪圖並取得分析報告
         img_filename, result_content = create_stock_chart(user_msg)
         
         if img_filename:
@@ -576,7 +617,6 @@ def handle_message(event):
                 ]
             )
         else:
-            # 提示使用者可以輸入哪些指令
             help_text = (
                 f"找不到代號或指令不明。\n(錯誤: {result_content})\n\n"
                 "👉 您可以試試輸入 **「功能」** 查看所有指令！\n\n"
