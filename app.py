@@ -17,13 +17,13 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v5.5.1 防彈除錯版 (強化錯誤捕捉)"
+APP_VERSION = "v5.6 畫圖修復版 (強化記憶體管理與新股防呆)"
 
 # --- 設定日誌顯示 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# --- 設定 matplotlib 後端 ---
+# --- 設定 matplotlib 後端 (重要：避免 GUI 錯誤) ---
 matplotlib.use('Agg')
 
 app = Flask(__name__)
@@ -41,16 +41,28 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # --- 2. 準備字型與圖片目錄 ---
 static_dir = 'static_images'
 if not os.path.exists(static_dir):
-    os.makedirs(static_dir)
+    try:
+        os.makedirs(static_dir)
+        logger.info(f"建立圖片目錄: {static_dir}")
+    except Exception as e:
+        logger.error(f"❌ 無法建立圖片目錄: {e}")
 
 font_file = 'TaipeiSansTCBeta-Regular.ttf'
 if not os.path.exists(font_file):
     logger.info("找不到字型檔，正在下載...")
-    import urllib.request
-    url = "https://drive.google.com/uc?id=1eGAsTN1HBpJAkeVM57_C7ccp7hbgSz3_&export=download"
-    urllib.request.urlretrieve(url, font_file)
+    try:
+        import urllib.request
+        url = "https://drive.google.com/uc?id=1eGAsTN1HBpJAkeVM57_C7ccp7hbgSz3_&export=download"
+        urllib.request.urlretrieve(url, font_file)
+        logger.info("✅ 字型下載成功")
+    except Exception as e:
+        logger.error(f"❌ 字型下載失敗: {e}")
 
-my_font = FontProperties(fname=font_file)
+try:
+    my_font = FontProperties(fname=font_file)
+except:
+    logger.warning("⚠️ 字型載入失敗，將使用預設字型 (中文可能亂碼)")
+    my_font = None
 
 # --- 3. 全域快取 (EPS Cache) ---
 EPS_CACHE = {}
@@ -244,19 +256,16 @@ WEIGHT_BY_STATE = {
 }
 
 def calculate_score(df_cand, weights):
-    # Trend
     score_rs = df_cand['rs_rank'] * 100
     score_ma = np.where(df_cand['ma20'] > df_cand['ma60'], 100, 0)
     df_cand['score_trend'] = (score_rs * 0.7) + (score_ma * 0.3)
     
-    # Momentum
     slope_pct = (df_cand['slope'] / df_cand['price']).fillna(0)
     score_slope = np.where(slope_pct > 0, (slope_pct * 1000).clip(upper=100), 0)
     vol = df_cand['vol_ratio']
     score_vol = np.exp(-((vol - 2.0) ** 2) / 2.0) * 100
     df_cand['score_momentum'] = (score_slope * 0.4) + (score_vol * 0.6)
     
-    # Risk
     atr_pct = df_cand['atr'] / df_cand['price']
     dist = (atr_pct - 0.03).abs()
     df_cand['score_risk'] = (100 - (dist * 100 * 20)).clip(lower=0)
@@ -279,7 +288,224 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# --- 7. 選股功能 ---
+# --- 7. 繪圖引擎 (v5.6 修復版) ---
+def create_stock_chart(stock_code):
+    plt.close('all') # 確保清空畫布
+    
+    try:
+        raw_code = stock_code.upper().strip()
+        
+        # 1. 取得資料
+        if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
+            target = raw_code
+            ticker = yf.Ticker(target)
+        else:
+            target = raw_code + ".TW"
+            ticker = yf.Ticker(target)
+        
+        df = fetch_data_with_retry(ticker, period="1y")
+        
+        if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
+            target_two = raw_code + ".TWO"
+            ticker_two = yf.Ticker(target_two)
+            df = fetch_data_with_retry(ticker_two, period="1y")
+            if not df.empty:
+                target = target_two
+                ticker = ticker_two
+
+        if df.empty: 
+            return None, "系統繁忙 (Yahoo 限流) 或 找不到該代號資料，請確認代號是否正確。"
+        
+        stock_name = get_stock_name(target)
+        eps = get_eps_cached(target)
+
+        # 抓大盤 RS
+        try:
+            bench_ticker = yf.Ticker("0050.TW")
+            bench_df = fetch_data_with_retry(bench_ticker, period="1y")
+        except:
+            bench_df = pd.DataFrame()
+
+        # --- 指標計算 ---
+        # ★ 防呆：資料長度檢查
+        if len(df) < 60:
+            logger.warning(f"{target} 資料不足 60 筆，僅計算短期指標")
+            df['MA20'] = df['Close'].rolling(window=20).mean()
+            df['MA60'] = df['MA20'] # 暫代
+        else:
+            df['MA20'] = df['Close'].rolling(window=20).mean()
+            df['MA60'] = df['Close'].rolling(window=60).mean()
+            
+        df['MA20_Slope'] = df['MA20'].diff(5)
+        
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs_idx = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs_idx))
+
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+        df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
+
+        df['ADX'] = calculate_adx(df)
+        df['ATR'] = calculate_atr(df)
+        df['OBV'] = calculate_obv(df)
+
+        # RS 計算
+        if not bench_df.empty and len(bench_df) > 20:
+            common_idx = df.index.intersection(bench_df.index)
+            stock_close = df.loc[common_idx, 'Close']
+            bench_close = bench_df.loc[common_idx, 'Close']
+            stock_ret = stock_close.pct_change(20)
+            bench_ret = bench_close.pct_change(20)
+            df.loc[common_idx, 'RS'] = (1 + stock_ret) / (1 + bench_ret)
+        else:
+            df['RS'] = 1.0
+
+        # --- 最新數據 ---
+        current_price = df['Close'].iloc[-1]
+        ma20 = df['MA20'].iloc[-1]
+        ma60 = df['MA60'].iloc[-1]
+        
+        # 處理 NaN (例如剛上市不到5天)
+        if pd.isna(ma20): ma20 = current_price
+        if pd.isna(ma60): ma60 = current_price
+        
+        ma20_slope = df['MA20_Slope'].iloc[-1]
+        rsi = df['RSI'].iloc[-1] if not pd.isna(df['RSI'].iloc[-1]) else 50
+        vol_ratio = df['Vol_Ratio'].iloc[-1] if not pd.isna(df['Vol_Ratio'].iloc[-1]) else 1.0
+        adx = df['ADX'].iloc[-1] if not pd.isna(df['ADX'].iloc[-1]) else 0
+        atr = df['ATR'].iloc[-1]
+        if pd.isna(atr) or atr <= 0: atr = current_price * 0.02
+        rs_val = df['RS'].iloc[-1] if 'RS' in df.columns and not pd.isna(df['RS'].iloc[-1]) else 1.0
+        
+        # --- 策略分析 ---
+        
+        # 趨勢品質
+        if adx < 20: trend_quality = "盤整 (無趨勢) 💤"
+        elif adx > 40: trend_quality = "趨勢強勁 (留意回檔) 🔥"
+        else: trend_quality = "趨勢確立 ✅"
+
+        # 趨勢方向
+        slope_val = ma20_slope if not pd.isna(ma20_slope) else 0
+        if ma20 > ma60 and slope_val > 0: trend_dir = "多頭"
+        elif ma20 < ma60 and slope_val < 0: trend_dir = "空頭"
+        else: trend_dir = "震盪"
+
+        if rs_val > 1.05: rs_str = "強於大盤 (資金青睞) 🦅"
+        elif rs_val < 0.95: rs_str = "弱於大盤 (遭提款) 🐢"
+        else: rs_str = "跟隨大盤"
+
+        # R值風控
+        atr_stop_loss = current_price - (atr * 1.5)
+        
+        if trend_dir == "多頭":
+            if ma20 < current_price: final_stop = max(atr_stop_loss, ma20)
+            else: final_stop = atr_stop_loss
+        else:
+            final_stop = atr_stop_loss
+        
+        target_price = current_price + (atr * 3)
+
+        # OBV 背離
+        obv_warning = ""
+        try:
+            if len(df) > 10:
+                price_trend = df['Close'].iloc[-1] > df['Close'].iloc[-10]
+                obv_trend = df['OBV'].iloc[-1] < df['OBV'].iloc[-10]
+                if price_trend and obv_trend: obv_warning = " (⚠️價漲量縮，留意背離)"
+        except: pass
+
+        # 綜合診斷
+        advice = "觀望"
+        if trend_dir == "多頭":
+            if adx < 20: advice = "盤整股，不符本系統交易條件"
+            elif rs_val < 1: advice = "個股趨勢雖好但跑輸大盤，補漲或假突破留意"
+            elif vol_ratio > 3: advice = "短線爆量過熱" + obv_warning
+            elif rsi < 40: advice = "多頭趨勢回檔中，耐心等量縮止跌"
+            elif 60 <= rsi <= 75: advice = "量價健康，趨勢強勁，R值漂亮可佈局"
+            elif rsi > 80: advice = "乖離過大，隨時回檔，勿追高"
+            else: advice = "沿月線操作，跌破ATR停損出場" + obv_warning
+        elif trend_dir == "空頭":
+            advice = "趨勢向下，反彈皆是逃命波"
+        else:
+            advice = "均線糾結，方向未明，多看少做"
+
+        analysis_report = (
+            f"📊 {stock_name} ({target}) 實戰診斷\n"
+            f"💰 現價: {current_price:.1f} | EPS: {eps}\n"
+            f"📈 趨勢: {trend_dir} | {trend_quality}\n"
+            f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
+            f"🌊 動能: 量比 {vol_ratio:.1f}\n"
+            f"⚡ RSI: {rsi:.1f}\n"
+            f"------------------\n"
+            f"🎯 目標價: {target_price:.1f} (ATR*3)\n"
+            f"🛑 停損點: {final_stop:.1f} (移動停損)\n"
+            f"💡 建議: {advice}\n"
+            f"(看不懂名詞？輸入「說明」看教學)"
+        )
+
+        # --- ★ 畫圖區塊 (包在 try/finally 確保關閉) ---
+        try:
+            logger.info(f"🎨 開始繪製圖表: {target}")
+            # 設定畫布 (Agg模式)
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
+
+            # 主圖
+            ax1.plot(df.index, df['Close'], color='black', alpha=0.6, linewidth=1, label='收盤價')
+            if len(df) >= 20: ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='月線')
+            if len(df) >= 60: ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='季線')
+            
+            # 畫買賣訊號 (需檢查資料長度)
+            if len(df) > 60:
+                ax1.plot(golden.index, golden['MA20'], '^', color='red', markersize=14, markeredgecolor='black', label='黃金交叉')
+                ax1.plot(death.index, death['MA20'], 'v', color='green', markersize=14, markeredgecolor='black', label='死亡交叉')
+            
+            title_font = my_font if my_font else None
+            ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=title_font, fontweight='bold')
+            ax1.legend(loc='upper left', prop=title_font)
+            ax1.grid(True, linestyle=':', alpha=0.5)
+
+            # 副圖1：成交量
+            colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
+            ax2.bar(df.index, df['Volume'], color=colors, alpha=0.8)
+            ax2.plot(df.index, df['Vol_MA20'], color='blue', linewidth=1.5, label='20日均量')
+            ax2.set_ylabel("成交量", fontproperties=title_font)
+            ax2.legend(loc='upper right', prop=title_font)
+            ax2.grid(True, linestyle=':', alpha=0.3)
+
+            # 副圖2：RSI
+            ax3.plot(df.index, df['RSI'], color='purple', linewidth=1.5, label='RSI')
+            ax3.axhline(80, color='red', linestyle='--', alpha=0.5)
+            ax3.axhline(60, color='orange', linestyle='--', alpha=0.5)
+            ax3.axhline(30, color='green', linestyle='--', alpha=0.5)
+            ax3.set_ylabel("RSI", fontproperties=title_font)
+            ax3.grid(True, linestyle=':', alpha=0.3)
+            ax3.set_ylim(0, 100)
+
+            fig.autofmt_xdate()
+            
+            filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
+            filepath = os.path.join(static_dir, filename)
+            
+            logger.info(f"💾 正在存檔: {filepath}")
+            plt.savefig(filepath, bbox_inches='tight')
+            logger.info("✅ 存檔完成")
+            
+            return filename, analysis_report
+            
+        except Exception as plot_err:
+            logger.error(f"❌ 畫圖失敗: {plot_err}")
+            return None, f"繪圖失敗 ({str(plot_err)})，但分析正常：\n\n{analysis_report}"
+        finally:
+            plt.close('all') # ★ 關鍵：強制釋放記憶體
+
+    except Exception as e:
+        logger.error(f"❌ create_stock_chart 嚴重錯誤: {traceback.format_exc()}")
+        return None, f"分析失敗: {str(e)}"
+
+# --- 7. 選股功能 (略，同 v5.4，請保留完整版) ---
+# ... (請將 v5.4 的 scan_potential_stocks 複製到這裡) ...
 def scan_potential_stocks(max_price=None, sector_name=None):
     logger.info(f"🔎 開始掃描股票: {sector_name or '百元績優'}")
     
@@ -390,26 +616,24 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
     return title_prefix, recommendations
 
-# --- 8. Line Bot 路由與處理 ---
+# --- 8. Line Bot 路由與處理 (v5.6 防彈版) ---
 @app.route("/callback", methods=['POST'])
 def callback():
-    # ★ v5.5.1 防彈修正：使用 .get() 避免缺少 header 導致崩潰
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     
-    logger.info(f"收到 Webhook 請求: {body[:100]}...") # 只印出前100字避免 Log 爆炸
+    logger.info(f"收到 Webhook 請求: {body[:100]}...") 
 
     if signature is None:
-        logger.error("❌ 錯誤：請求缺少 X-Line-Signature Header，可能是瀏覽器直接訪問。")
+        logger.error("❌ 錯誤：請求缺少 X-Line-Signature Header")
         abort(400)
 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        logger.error("❌ 錯誤：簽章驗證失敗 (Invalid Signature)")
+        logger.error("❌ 錯誤：簽章驗證失敗")
         abort(400)
     except Exception as e:
-        # ★ 這裡會捕捉所有未被處理的錯誤，並印出 Traceback
         logger.error(f"❌ Callback 發生未預期錯誤: {traceback.format_exc()}")
         abort(500)
         
@@ -424,21 +648,24 @@ def serve_image(filename): return send_from_directory(static_dir, filename)
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip() if event.message.text else ""
-    logger.info(f"處理使用者訊息: {user_msg}") # 日誌
+    logger.info(f"處理使用者訊息: {user_msg}")
     
     try:
-        if not user_msg:
-            return
+        if not user_msg: return
 
+        # ... (中間的新手教學、功能選單、選股邏輯 與 v5.5 相同，省略) ...
+        # 請確保這裡有 sector_hit 和 user_msg=="推薦" 的判斷邏輯
+        # ...
+        
+        # 為了完整性，這裡補上選股邏輯的判斷區塊
         if user_msg in ["說明", "教學", "名詞解釋", "新手", "看不懂"]:
             tutorial_plus = (
                 "🎓 **股市小白 專有名詞懶人包**\n"
                 "======================\n\n"
                 "⚖️ **倉位建議 (Position Sizing)**\n"
-                "系統根據分數高低，建議買多少：\n"
-                "• 🔥 **重倉 (1.5x)**: 分數>90，勝率極高，可放大部位。\n"
-                "• ✅ **標準倉 (1.0x)**: 分數>80，正常買進。\n"
-                "• 🛡️ **輕倉 (0.5x)**: 分數>70，嘗試性建倉。\n\n"
+                "• 🔥 重倉 (1.5x): 分數>90，勝率極高。\n"
+                "• ✅ 標準倉 (1.0x): 分數>80，正常買進。\n"
+                "• 🛡️ 輕倉 (0.5x): 分數>70，嘗試性建倉。\n\n"
                 "🏆 **Score (綜合評分)**\n"
                 "• 滿分100，越高越好，代表趨勢+資金+動能都到位。\n\n"
                 "🦅 **RS Rank (相對強弱)**\n"
@@ -487,7 +714,16 @@ def handle_message(event):
             prefix, res = scan_potential_stocks() 
             text = f"📊 {prefix}潛力股\n(Score評分制)\n====================\n" + "\n\n".join(res) if res else "無符合條件個股"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+        elif user_msg == "百元推薦":
+            prefix, res = scan_potential_stocks(max_price=100)
+            text = f"📊 {prefix}潛力股\n(Score評分制)\n====================\n" + "\n\n".join(res) if res else "無符合條件個股"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+        elif user_msg in ["隨機推薦", "隨機", "手氣不錯", "熱門隨機推薦"]:
+            prefix, res = scan_potential_stocks(sector_name="隨機")
+            text = f"🎲 {prefix}潛力股\n(Score評分制)\n====================\n" + "\n\n".join(res) if res else "運氣不好，沒找到強勢股。"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         else:
+            # 個股診斷 (重點修復區)
             img, txt = create_stock_chart(user_msg)
             if img:
                 url = request.host_url.replace("http://", "https://") + 'images/' + img
@@ -500,7 +736,6 @@ def handle_message(event):
                 
     except Exception as e:
         logger.error(f"處理訊息時發生嚴重錯誤: {traceback.format_exc()}")
-        # 嘗試回傳錯誤訊息給使用者 (如果 token 還沒過期)
         try:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統發生內部錯誤，請稍後再試。"))
         except:
