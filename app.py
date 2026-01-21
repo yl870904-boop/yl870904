@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
-# ★ 改用物件導向繪圖
+# ★ 改用物件導向繪圖，解決雲端崩潰問題
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.font_manager import FontProperties
@@ -21,7 +21,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v6.4 數學運算修復版 (徹底解決 replace 錯誤)"
+APP_VERSION = "v6.5 最終穩定版 (修復 plt 定義問題)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -298,8 +298,9 @@ def create_stock_chart(stock_code):
     # 鎖定
     with plot_lock:
         try:
-            plt.close('all')
-            plt.clf()
+            # 移除 plt 指令，使用純 OO 繪圖
+            # plt.close('all') # 移除
+            # plt.clf()        # 移除
             
             raw_code = stock_code.upper().strip()
             # 1. 取得資料
@@ -448,10 +449,17 @@ def create_stock_chart(stock_code):
             fig.savefig(filepath, bbox_inches='tight')
             
             result_file = filename
+            
+            # Explicit cleanup
+            del fig
+            del canvas
 
         except Exception as e:
-            logger.error(f"繪圖錯誤: {e}")
             return None, f"繪圖失敗: {str(e)}\n\n{result_text}"
+        finally:
+            # plt.close('all') # Removed
+            # plt.clf() # Removed
+            gc.collect()
 
     return result_file, result_text
 
