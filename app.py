@@ -16,8 +16,8 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
-# --- 設定應用程式版本 ---
-APP_VERSION = "v5.6 畫圖修復版 (強化記憶體管理與新股防呆)"
+# --- 設定應用程式版本 (請確認 Line 回傳此版本號) ---
+APP_VERSION = "v5.7 最終確認版 (記憶體優化+上櫃修復)"
 
 # --- 設定日誌顯示 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -256,16 +256,19 @@ WEIGHT_BY_STATE = {
 }
 
 def calculate_score(df_cand, weights):
+    # Trend
     score_rs = df_cand['rs_rank'] * 100
     score_ma = np.where(df_cand['ma20'] > df_cand['ma60'], 100, 0)
     df_cand['score_trend'] = (score_rs * 0.7) + (score_ma * 0.3)
     
+    # Momentum
     slope_pct = (df_cand['slope'] / df_cand['price']).fillna(0)
     score_slope = np.where(slope_pct > 0, (slope_pct * 1000).clip(upper=100), 0)
     vol = df_cand['vol_ratio']
     score_vol = np.exp(-((vol - 2.0) ** 2) / 2.0) * 100
     df_cand['score_momentum'] = (score_slope * 0.4) + (score_vol * 0.6)
     
+    # Risk
     atr_pct = df_cand['atr'] / df_cand['price']
     dist = (atr_pct - 0.03).abs()
     df_cand['score_risk'] = (100 - (dist * 100 * 20)).clip(lower=0)
