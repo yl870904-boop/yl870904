@@ -11,13 +11,15 @@ import random
 import logging
 import traceback
 import sys
+import threading # ★ 新增：執行緒鎖定
+import gc        # ★ 新增：強制記憶體回收
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v5.8 緊急修復版 (修正語法錯誤)"
+APP_VERSION = "v5.9 繪圖救援版 (加入排隊鎖+記憶體回收)"
 
 # --- 設定日誌顯示 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -26,10 +28,12 @@ logger = logging.getLogger(__name__)
 # --- 設定 matplotlib 後端 ---
 matplotlib.use('Agg')
 
+# ★ 建立全域繪圖鎖 (關鍵修正：防止多執行緒同時畫圖導致崩潰)
+plot_lock = threading.Lock()
+
 app = Flask(__name__)
 
 # --- 1. 設定密鑰 ---
-# 優先從環境變數讀取，若無則使用預設值 (建議在 Render 後台設定)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '0k2eulC1Ewzjg5O0FiLVPH3ShF3RdgzcThaCsTh4vil0FqvsOZ97kw8m6AHhaZ7YVk3nedStFUyQ9hv/6lGD9xc5o+2OC/BGE4Ua3z95PICP1lF6WWTdlXnfRe++hqhPrX6f4rMZ7wjVvMTZrJvXqwdB04t89/1O/w1cDnyilFU=')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', 'a6de3f291be03ffe87b72790cad5496a')
 
@@ -292,198 +296,199 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# --- 7. 繪圖引擎 (v5.6 修復版) ---
+# --- 7. 繪圖引擎 (v5.9 修復版 - 含鎖定與回收) ---
 def create_stock_chart(stock_code):
-    plt.close('all') # 確保清空畫布
+    # ★ 關鍵：強制回收記憶體
+    gc.collect()
     
-    try:
-        raw_code = stock_code.upper().strip()
-        
-        # 1. 取得資料
-        if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
-            target = raw_code
-            ticker = yf.Ticker(target)
-        else:
-            target = raw_code + ".TW"
-            ticker = yf.Ticker(target)
-        
-        df = fetch_data_with_retry(ticker, period="1y")
-        
-        if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
-            target_two = raw_code + ".TWO"
-            ticker_two = yf.Ticker(target_two)
-            df = fetch_data_with_retry(ticker_two, period="1y")
-            if not df.empty:
-                target = target_two
-                ticker = ticker_two
-
-        if df.empty: 
-            return None, "系統繁忙 (Yahoo 限流) 或 找不到該代號資料，請確認代號是否正確。"
-        
-        stock_name = get_stock_name(target)
-        eps = get_eps_cached(target)
-
-        # 抓大盤 RS
+    # ★ 關鍵：進入鎖定區域，確保一次只畫一張圖
+    with plot_lock:
         try:
-            bench_ticker = yf.Ticker("0050.TW")
-            bench_df = fetch_data_with_retry(bench_ticker, period="1y")
-        except:
-            bench_df = pd.DataFrame()
-
-        # --- 指標計算 ---
-        # ★ 防呆：資料長度檢查
-        if len(df) < 60:
-            logger.warning(f"{target} 資料不足 60 筆，僅計算短期指標")
-            df['MA20'] = df['Close'].rolling(window=20).mean()
-            df['MA60'] = df['MA20'] # 暫代
-        else:
-            df['MA20'] = df['Close'].rolling(window=20).mean()
-            df['MA60'] = df['Close'].rolling(window=60).mean()
+            # 強制關閉所有舊圖表
+            plt.close('all')
+            plt.clf()
             
-        df['MA20_Slope'] = df['MA20'].diff(5)
-        
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs_idx = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs_idx))
+            raw_code = stock_code.upper().strip()
+            
+            # 1. 取得資料
+            if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
+                target = raw_code
+                ticker = yf.Ticker(target)
+            else:
+                target = raw_code + ".TW"
+                ticker = yf.Ticker(target)
+            
+            df = fetch_data_with_retry(ticker, period="1y")
+            
+            if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
+                target_two = raw_code + ".TWO"
+                ticker_two = yf.Ticker(target_two)
+                df = fetch_data_with_retry(ticker_two, period="1y")
+                if not df.empty:
+                    target = target_two
+                    ticker = ticker_two
 
-        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-        df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
+            if df.empty: 
+                return None, "系統繁忙 (Yahoo 限流) 或 找不到該代號資料，請確認代號是否正確。"
+            
+            stock_name = get_stock_name(target)
+            eps = get_eps_cached(target)
 
-        df['ADX'] = calculate_adx(df)
-        df['ATR'] = calculate_atr(df)
-        df['OBV'] = calculate_obv(df)
+            # 抓大盤 RS
+            try:
+                bench_ticker = yf.Ticker("0050.TW")
+                bench_df = fetch_data_with_retry(bench_ticker, period="1y")
+            except:
+                bench_df = pd.DataFrame()
 
-        # RS 計算
-        if not bench_df.empty and len(bench_df) > 20:
-            common_idx = df.index.intersection(bench_df.index)
-            stock_close = df.loc[common_idx, 'Close']
-            bench_close = bench_df.loc[common_idx, 'Close']
-            stock_ret = stock_close.pct_change(20)
-            bench_ret = bench_close.pct_change(20)
-            df.loc[common_idx, 'RS'] = (1 + stock_ret) / (1 + bench_ret)
-        else:
-            df['RS'] = 1.0
+            # --- 指標計算 ---
+            if len(df) < 60:
+                logger.warning(f"{target} 資料不足 60 筆，僅計算短期指標")
+                df['MA20'] = df['Close'].rolling(window=20).mean()
+                df['MA60'] = df['MA20'] # 暫代
+            else:
+                df['MA20'] = df['Close'].rolling(window=20).mean()
+                df['MA60'] = df['Close'].rolling(window=60).mean()
+                
+            df['MA20_Slope'] = df['MA20'].diff(5)
+            
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs_idx = gain / loss
+            df['RSI'] = 100 - (100 / (1 + rs_idx))
 
-        # --- 最新數據 ---
-        current_price = df['Close'].iloc[-1]
-        ma20 = df['MA20'].iloc[-1]
-        ma60 = df['MA60'].iloc[-1]
-        
-        # 處理 NaN (例如剛上市不到5天)
-        if pd.isna(ma20): ma20 = current_price
-        if pd.isna(ma60): ma60 = current_price
-        
-        ma20_slope = df['MA20_Slope'].iloc[-1]
-        rsi = df['RSI'].iloc[-1] if not pd.isna(df['RSI'].iloc[-1]) else 50
-        vol_ratio = df['Vol_Ratio'].iloc[-1] if not pd.isna(df['Vol_Ratio'].iloc[-1]) else 1.0
-        adx = df['ADX'].iloc[-1] if not pd.isna(df['ADX'].iloc[-1]) else 0
-        atr = df['ATR'].iloc[-1]
-        if pd.isna(atr) or atr <= 0: atr = current_price * 0.02
-        rs_val = df['RS'].iloc[-1] if 'RS' in df.columns and not pd.isna(df['RS'].iloc[-1]) else 1.0
-        
-        # --- 策略分析 ---
-        
-        # 趨勢品質
-        if adx < 20: trend_quality = "盤整 (無趨勢) 💤"
-        elif adx > 40: trend_quality = "趨勢強勁 (留意回檔) 🔥"
-        else: trend_quality = "趨勢確立 ✅"
+            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+            df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
 
-        # 趨勢方向
-        slope_val = ma20_slope if not pd.isna(ma20_slope) else 0
-        if ma20 > ma60 and slope_val > 0: trend_dir = "多頭"
-        elif ma20 < ma60 and slope_val < 0: trend_dir = "空頭"
-        else: trend_dir = "震盪"
+            df['ADX'] = calculate_adx(df)
+            df['ATR'] = calculate_atr(df)
+            df['OBV'] = calculate_obv(df)
 
-        if rs_val > 1.05: rs_str = "強於大盤 (資金青睞) 🦅"
-        elif rs_val < 0.95: rs_str = "弱於大盤 (遭提款) 🐢"
-        else: rs_str = "跟隨大盤"
+            # RS 計算
+            if not bench_df.empty and len(bench_df) > 20:
+                common_idx = df.index.intersection(bench_df.index)
+                stock_close = df.loc[common_idx, 'Close']
+                bench_close = bench_df.loc[common_idx, 'Close']
+                stock_ret = stock_close.pct_change(20)
+                bench_ret = bench_close.pct_change(20)
+                df.loc[common_idx, 'RS'] = (1 + stock_ret) / (1 + bench_ret)
+            else:
+                df['RS'] = 1.0
 
-        # R值風控
-        atr_stop_loss = current_price - (atr * 1.5)
-        
-        if trend_dir == "多頭":
-            if ma20 < current_price: final_stop = max(atr_stop_loss, ma20)
-            else: final_stop = atr_stop_loss
-        else:
-            final_stop = atr_stop_loss
-        
-        target_price = current_price + (atr * 3)
+            # --- 最新數據 ---
+            current_price = df['Close'].iloc[-1]
+            ma20 = df['MA20'].iloc[-1]
+            ma60 = df['MA60'].iloc[-1]
+            
+            # 處理 NaN
+            if pd.isna(ma20): ma20 = current_price
+            if pd.isna(ma60): ma60 = current_price
+            
+            ma20_slope = df['MA20_Slope'].iloc[-1]
+            rsi = df['RSI'].iloc[-1] if not pd.isna(df['RSI'].iloc[-1]) else 50
+            vol_ratio = df['Vol_Ratio'].iloc[-1] if not pd.isna(df['Vol_Ratio'].iloc[-1]) else 1.0
+            adx = df['ADX'].iloc[-1] if not pd.isna(df['ADX'].iloc[-1]) else 0
+            atr = df['ATR'].iloc[-1]
+            if pd.isna(atr) or atr <= 0: atr = current_price * 0.02
+            rs_val = df['RS'].iloc[-1] if 'RS' in df.columns and not pd.isna(df['RS'].iloc[-1]) else 1.0
+            
+            # --- 策略分析 ---
+            if adx < 20: trend_quality = "盤整 (無趨勢) 💤"
+            elif adx > 40: trend_quality = "趨勢強勁 (留意回檔) 🔥"
+            else: trend_quality = "趨勢確立 ✅"
 
-        # OBV 背離
-        obv_warning = ""
-        try:
-            if len(df) > 10:
-                price_trend = df['Close'].iloc[-1] > df['Close'].iloc[-10]
-                obv_trend = df['OBV'].iloc[-1] < df['OBV'].iloc[-10]
-                if price_trend and obv_trend: obv_warning = " (⚠️價漲量縮，留意背離)"
-        except: pass
+            slope_val = ma20_slope if not pd.isna(ma20_slope) else 0
+            if ma20 > ma60 and slope_val > 0: trend_dir = "多頭"
+            elif ma20 < ma60 and slope_val < 0: trend_dir = "空頭"
+            else: trend_dir = "震盪"
 
-        # 綜合診斷
-        advice = "觀望"
-        if trend_dir == "多頭":
-            if adx < 20: advice = "盤整股，不符本系統交易條件"
-            elif rs_val < 1: advice = "個股趨勢雖好但跑輸大盤，補漲或假突破留意"
-            elif vol_ratio > 3: advice = "短線爆量過熱" + obv_warning
-            elif rsi < 40: advice = "多頭趨勢回檔中，耐心等量縮止跌"
-            elif 60 <= rsi <= 75: advice = "量價健康，趨勢強勁，R值漂亮可佈局"
-            elif rsi > 80: advice = "乖離過大，隨時回檔，勿追高"
-            else: advice = "沿月線操作，跌破ATR停損出場" + obv_warning
-        elif trend_dir == "空頭":
-            advice = "趨勢向下，反彈皆是逃命波"
-        else:
-            advice = "均線糾結，方向未明，多看少做"
+            if rs_val > 1.05: rs_str = "強於大盤 (資金青睞) 🦅"
+            elif rs_val < 0.95: rs_str = "弱於大盤 (遭提款) 🐢"
+            else: rs_str = "跟隨大盤"
 
-        analysis_report = (
-            f"📊 {stock_name} ({target}) 實戰診斷\n"
-            f"💰 現價: {current_price:.1f} | EPS: {eps}\n"
-            f"📈 趨勢: {trend_dir} | {trend_quality}\n"
-            f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
-            f"🌊 動能: 量比 {vol_ratio:.1f}\n"
-            f"⚡ RSI: {rsi:.1f}\n"
-            f"------------------\n"
-            f"🎯 目標價: {target_price:.1f} (ATR*3)\n"
-            f"🛑 停損點: {final_stop:.1f} (移動停損)\n"
-            f"💡 建議: {advice}\n"
-            f"(看不懂名詞？輸入「說明」看教學)"
-        )
+            atr_stop_loss = current_price - (atr * 1.5)
+            
+            if trend_dir == "多頭":
+                if ma20 < current_price: final_stop = max(atr_stop_loss, ma20)
+                else: final_stop = atr_stop_loss
+            else:
+                final_stop = atr_stop_loss
+            
+            target_price = current_price + (atr * 3)
 
-        # --- ★ 畫圖區塊 (包在 try/finally 確保關閉) ---
-        try:
-            logger.info(f"🎨 開始繪製圖表: {target}")
-            # 設定畫布 (Agg模式)
+            obv_warning = ""
+            try:
+                if len(df) > 10:
+                    price_trend = df['Close'].iloc[-1] > df['Close'].iloc[-10]
+                    obv_trend = df['OBV'].iloc[-1] < df['OBV'].iloc[-10]
+                    if price_trend and obv_trend: obv_warning = " (⚠️價漲量縮，留意背離)"
+            except: pass
+
+            advice = "觀望"
+            if trend_dir == "多頭":
+                if adx < 20: advice = "盤整股，不符本系統交易條件"
+                elif rs_val < 1: advice = "個股趨勢雖好但跑輸大盤，補漲或假突破留意"
+                elif vol_ratio > 3: advice = "短線爆量過熱" + obv_warning
+                elif rsi < 40: advice = "多頭趨勢回檔中，耐心等量縮止跌"
+                elif 60 <= rsi <= 75: advice = "量價健康，趨勢強勁，R值漂亮可佈局"
+                elif rsi > 80: advice = "乖離過大，隨時回檔，勿追高"
+                else: advice = "沿月線操作，跌破ATR停損出場" + obv_warning
+            elif trend_dir == "空頭":
+                advice = "趨勢向下，反彈皆是逃命波"
+            else:
+                advice = "均線糾結，方向未明，多看少做"
+
+            analysis_report = (
+                f"📊 {stock_name} ({target}) 實戰診斷\n"
+                f"💰 現價: {current_price:.1f} | EPS: {eps}\n"
+                f"📈 趨勢: {trend_dir} | {trend_quality}\n"
+                f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
+                f"🌊 動能: 量比 {vol_ratio:.1f}\n"
+                f"⚡ RSI: {rsi:.1f}\n"
+                f"------------------\n"
+                f"🎯 目標價: {target_price:.1f} (ATR*3)\n"
+                f"🛑 停損點: {final_stop:.1f} (移動停損)\n"
+                f"💡 建議: {advice}\n"
+                f"(看不懂名詞？輸入「說明」看教學)"
+            )
+
+            # --- 繪圖 (Agg模式) ---
+            logger.info(f"🎨 繪製圖表細節: {target}")
             fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
 
-            # 主圖
+            # 使用預設字型以防萬一
+            plot_font = my_font if my_font else None
+
             ax1.plot(df.index, df['Close'], color='black', alpha=0.6, linewidth=1, label='收盤價')
             if len(df) >= 20: ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='月線')
             if len(df) >= 60: ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='季線')
             
-            # 畫買賣訊號 (需檢查資料長度)
             if len(df) > 60:
                 ax1.plot(golden.index, golden['MA20'], '^', color='red', markersize=14, markeredgecolor='black', label='黃金交叉')
                 ax1.plot(death.index, death['MA20'], 'v', color='green', markersize=14, markeredgecolor='black', label='死亡交叉')
             
-            title_font = my_font if my_font else None
-            ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=title_font, fontweight='bold')
-            ax1.legend(loc='upper left', prop=title_font)
+            # 使用 fallback 字型
+            try:
+                ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=plot_font, fontweight='bold')
+            except:
+                ax1.set_title(f"{target} Analysis", fontsize=22)
+
+            ax1.legend(loc='upper left', prop=plot_font)
             ax1.grid(True, linestyle=':', alpha=0.5)
 
-            # 副圖1：成交量
             colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
             ax2.bar(df.index, df['Volume'], color=colors, alpha=0.8)
             ax2.plot(df.index, df['Vol_MA20'], color='blue', linewidth=1.5, label='20日均量')
-            ax2.set_ylabel("成交量", fontproperties=title_font)
-            ax2.legend(loc='upper right', prop=title_font)
+            ax2.set_ylabel("成交量", fontproperties=plot_font)
+            ax2.legend(loc='upper right', prop=plot_font)
             ax2.grid(True, linestyle=':', alpha=0.3)
 
-            # 副圖2：RSI
             ax3.plot(df.index, df['RSI'], color='purple', linewidth=1.5, label='RSI')
             ax3.axhline(80, color='red', linestyle='--', alpha=0.5)
             ax3.axhline(60, color='orange', linestyle='--', alpha=0.5)
             ax3.axhline(30, color='green', linestyle='--', alpha=0.5)
-            ax3.set_ylabel("RSI", fontproperties=title_font)
+            ax3.set_ylabel("RSI", fontproperties=plot_font)
             ax3.grid(True, linestyle=':', alpha=0.3)
             ax3.set_ylim(0, 100)
 
@@ -499,10 +504,14 @@ def create_stock_chart(stock_code):
             return filename, analysis_report
             
         except Exception as plot_err:
-            logger.error(f"❌ 畫圖失敗: {plot_err}")
-            return None, f"繪圖失敗 ({str(plot_err)})，但分析正常：\n\n{analysis_report}"
+            logger.error(f"❌ 畫圖失敗 (Plot Error): {plot_err}")
+            # 如果畫圖失敗，嘗試只回傳文字報告
+            return None, f"繪圖失敗 (系統忙碌)，但數據分析正常：\n\n{analysis_report}"
         finally:
-            plt.close('all') # ★ 關鍵：強制釋放記憶體
+            # 無論成功失敗，一定要關閉畫布並回收記憶體
+            plt.close('all')
+            plt.clf()
+            gc.collect()
 
     except Exception as e:
         logger.error(f"❌ create_stock_chart 嚴重錯誤: {traceback.format_exc()}")
@@ -515,9 +524,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
     
     if sector_name == "隨機":
         all_s = set()
-        for s in SECTOR_DICT.values():
-            for x in s:
-                all_s.add(x)
+        for s in SECTOR_DICT.values(): for x in s: all_s.add(x)
         watch_list = random.sample(list(all_s), min(30, len(all_s)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
