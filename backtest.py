@@ -1,13 +1,14 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import warnings
 
 # 忽略 pandas 的一些運算警告
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心計算引擎 (與 v5.2 app.py 邏輯同步)
+# 1. 核心計算引擎 (與 v5.3 app.py 邏輯同步)
 # ==========================================
 
 def calculate_indicators(df):
@@ -32,15 +33,21 @@ def calculate_indicators(df):
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # ADX (14)
+    # ADX (14) - 修正版標準算法
     up = df['High'].diff()
     down = -df['Low'].diff()
     plus_dm = np.where((up > down) & (up > 0), up, 0.0)
     minus_dm = np.where((down > up) & (down > 0), down, 0.0)
     tr_sum = tr.rolling(14).sum()
+    
+    # 避免除以零
+    tr_sum = tr_sum.replace(0, 1)
+    
     plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(14).sum() / tr_sum)
     minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(14).sum() / tr_sum)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    
+    sum_di = abs(plus_di + minus_di).replace(0, 1)
+    dx = (abs(plus_di - minus_di) / sum_di) * 100
     df['ADX'] = dx.rolling(14).mean()
     
     # 量能結構
@@ -51,7 +58,7 @@ def calculate_indicators(df):
 
 def detect_market_state(bench_df):
     """
-    偵測市場狀態 (v5.2 核心)
+    偵測市場狀態 (v5.3 核心)
     回傳: 'TREND' (趨勢), 'RANGE' (盤整), 'VOLATILE' (劇烈波動)
     """
     if bench_df.empty: return 'RANGE'
@@ -109,7 +116,60 @@ def calculate_score_v5_2(row, weights):
     return total
 
 # ==========================================
-# 2. 回測執行模組
+# 2. 視覺化模組
+# ==========================================
+
+def plot_analysis(df_res):
+    """繪製三大關鍵驗證圖表"""
+    if df_res.empty: return
+
+    # 設定畫布
+    plt.figure(figsize=(18, 5))
+
+    # 1. Score vs ROI 散佈圖
+    plt.subplot(1, 3, 1)
+    plt.scatter(df_res['Score'], df_res['ROI'] * 100, alpha=0.6, c='blue')
+    plt.axhline(0, color='red', linestyle='--')
+    plt.xlabel('Score')
+    plt.ylabel('Return (%)')
+    plt.title('Score vs ROI (有效性驗證)')
+    plt.grid(True, alpha=0.3)
+
+    # 2. Score 分桶績效 (Bar Chart)
+    plt.subplot(1, 3, 2)
+    # 分桶
+    bins = [0, 60, 70, 80, 90, 100]
+    labels = ['<60', '60-70', '70-80', '80-90', '90+']
+    df_res['score_bin'] = pd.cut(df_res['Score'], bins=bins, labels=labels)
+    
+    # 計算各組平均報酬
+    grp = df_res.groupby('score_bin')['ROI'].mean() * 100
+    colors = ['gray' if x < 0 else 'red' for x in grp.values]
+    grp.plot(kind='bar', color=colors, alpha=0.7)
+    plt.axhline(0, color='black', linewidth=0.8)
+    plt.title('Avg Return by Score Bucket')
+    plt.ylabel('Avg Return (%)')
+    plt.grid(axis='y', alpha=0.3)
+
+    # 3. 分市場狀態表現
+    plt.subplot(1, 3, 3)
+    states = df_res['State'].unique()
+    for state in states:
+        subset = df_res[df_res['State'] == state]
+        plt.scatter(subset['Score'], subset['ROI'] * 100, label=state, alpha=0.6)
+    
+    plt.axhline(0, color='red', linestyle='--')
+    plt.xlabel('Score')
+    plt.ylabel('Return (%)')
+    plt.title('Score vs Return by Market State')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+# ==========================================
+# 3. 回測執行模組 (v5.3 策略切換)
 # ==========================================
 
 # 權重設定 (依據市場狀態)
@@ -119,55 +179,60 @@ WEIGHT_BY_STATE = {
     'VOLATILE':  {'trend': 0.3, 'momentum': 0.4, 'risk': 0.3}  # 波動盤：重短線動能
 }
 
-# 測試名單 (50檔績優股)
+# 測試名單 (50檔績優股 + 指數 ETF)
 WATCH_LIST = [
     '2330.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW', '2881.TW', '1605.TW', '2382.TW', '3231.TW', '2376.TW',
     '3037.TW', '2356.TW', '2324.TW', '3481.TW', '2609.TW', '2002.TW', '2882.TW', '2891.TW', '5880.TW', '2357.TW',
-    '2308.TW', '3008.TW', '1101.TW', '2886.TW', '2892.TW', '2884.TW', '2885.TW', '1301.TW', '1303.TW', '2002.TW'
+    '2308.TW', '3008.TW', '1101.TW', '2886.TW', '2892.TW', '2884.TW', '2885.TW', '1301.TW', '1303.TW', '2002.TW',
+    '0050.TW', '0056.TW', '00878.TW'
 ]
 
-def simulate_trade(entry_price, entry_date, df_future, atr, strategy='trend'):
+def simulate_trade_v5_3(entry_price, entry_date, df_future, atr, state):
     """
-    模擬單筆交易結果
-    策略:
-      - 停損: 買入價 - 1.5 * ATR
-      - 停利: 買入價 + 3.0 * ATR
-      - 持有上限: 20 天
+    v5.3 策略切換核心
+    根據市場狀態決定 Stop / Target / Holding Days
     """
-    stop_loss = entry_price - (atr * 1.5)
-    target = entry_price + (atr * 3.0)
-    
+    # --- 策略參數表 ---
+    if state == 'TREND':
+        stop_mult, target_mult, max_days = 1.5, 3.5, 30
+    elif state == 'RANGE':
+        stop_mult, target_mult, max_days = 1.0, 1.5, 10
+    else:  # VOLATILE
+        stop_mult, target_mult, max_days = 2.0, 2.0, 5
+
+    stop_loss = entry_price - (atr * stop_mult)
+    target = entry_price + (atr * target_mult)
+
+    # 截取最大持有天數
+    df_future = df_future.iloc[:max_days]
+
     for date, row in df_future.iterrows():
-        # 觸發停損
+        # 停損
         if row['Low'] <= stop_loss:
-            return (stop_loss - entry_price) / entry_price, 'STOP', date
-        # 觸發停利
+            return (stop_loss - entry_price) / entry_price, 'STOP', date, (date - df_future.index[0]).days
+        # 停利
         if row['High'] >= target:
-            return (target - entry_price) / entry_price, 'TARGET', date
+            return (target - entry_price) / entry_price, 'TARGET', date, (date - df_future.index[0]).days
             
     # 時間到期，強制平倉
     final_price = df_future.iloc[-1]['Close']
-    return (final_price - entry_price) / entry_price, 'TIME', df_future.index[-1]
+    return (final_price - entry_price) / entry_price, 'TIME', df_future.index[-1], max_days
 
 def run_backtest():
-    print("🚀 啟動 v5.2 策略回測實驗...")
-    print("📥 下載歷史資料 (6個月)...")
+    print("🚀 啟動 v5.3 策略回測實驗 (含視覺化)...")
+    print("📥 下載歷史資料 (12個月)...")
     
-    # 下載數據
-    data = yf.download(WATCH_LIST, period="6mo", progress=False)
-    bench = yf.Ticker("0050.TW").history(period="6mo")
-    
-    # 預先計算大盤指標
+    # 抓長一點 (12個月) 以驗證不同市場週期
+    data = yf.download(WATCH_LIST, period="1y", progress=False)
+    bench = yf.Ticker("0050.TW").history(period="1y")
     bench = calculate_indicators(bench)
     
     trades = []
-    daily_logs = []
     
     # 開始回測 (從第 60 天開始)
-    valid_dates = data.index[60:-20] # 留 20 天給未來模擬
-    
+    valid_dates = data.index[60:-35] # 留 35 天給未來模擬
     print(f"📅 回測區間: {valid_dates[0].date()} ~ {valid_dates[-1].date()}")
-    print("🔄 逐日模擬交易中...")
+    print("🔄 逐日模擬交易中 (請稍候)...")
 
     for date in valid_dates:
         # 1. 判斷當日市場狀態
@@ -214,24 +279,31 @@ def run_backtest():
             # 套用 v5.2 評分邏輯
             df_cand['score'] = df_cand.apply(lambda row: calculate_score_v5_2(row, weights), axis=1)
             
-            # 4. 模擬進場 (只買當天第一名，且分數 > 75)
+            # 4. 模擬進場 (只買當天第一名，且分數 > 70)
             top_pick = df_cand.sort_values('score', ascending=False).iloc[0]
             
-            if top_pick['score'] >= 75:
-                # 取得未來 20 天數據
-                future_data = data.xs(top_pick['stock'], axis=1, level=1).loc[date:].iloc[1:21]
+            if top_pick['score'] >= 70:
+                # v5.3 策略切換模擬
+                future_data = data.xs(top_pick['stock'], axis=1, level=1).loc[date:].iloc[1:32] # 抓夠長以符合 TREND 策略
                 if not future_data.empty:
-                    roi, reason, exit_date = simulate_trade(top_pick['price'], date, future_data, top_pick['atr'])
+                    roi, reason, exit_date, days = simulate_trade_v5_3(
+                        top_pick['price'], 
+                        date,
+                        future_data, 
+                        top_pick['atr'], 
+                        market_state
+                    )
                     trades.append({
-                        'Entry Date': date,
+                        'Date': date,
                         'Stock': top_pick['stock'],
                         'State': market_state,
                         'Score': int(top_pick['score']),
                         'Result': reason,
-                        'ROI': roi
+                        'ROI': roi,
+                        'Days': days
                     })
 
-    # 輸出結果
+    # 輸出結果與圖表
     if trades:
         df_res = pd.DataFrame(trades)
         print("\n🏆 === 回測績效報告 ===")
@@ -239,8 +311,12 @@ def run_backtest():
         print(f"勝率: {(df_res['ROI'] > 0).mean() * 100:.1f}%")
         print(f"平均報酬: {df_res['ROI'].mean() * 100:.2f}%")
         print(f"總報酬 (單利): {df_res['ROI'].sum() * 100:.2f}%")
-        print("\n📊 各市場狀態表現:")
+        print("\n📊 各市場狀態表現 (平均報酬):")
         print(df_res.groupby('State')['ROI'].mean() * 100)
+        
+        # 呼叫繪圖
+        print("\n📉 正在繪製分析圖表...")
+        plot_analysis(df_res)
     else:
         print("無符合條件的交易")
 
