@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
-# ★ 改用物件導向繪圖，解決雲端崩潰問題
+# ★ 改用物件導向繪圖
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.font_manager import FontProperties
@@ -21,7 +21,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v6.5 最終穩定版 (修復 plt 定義問題)"
+APP_VERSION = "v6.6 強制修復版 (ADX數學修正+上櫃優化)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -78,7 +78,7 @@ def get_eps_cached(ticker_symbol):
         return eps
     except: return 'N/A'
 
-# --- 4. 資料庫定義 (完整版) ---
+# --- 4. 資料庫定義 ---
 SECTOR_DICT = {
     "百元績優": [
         '2303.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '2409.TW', '3481.TW', 
@@ -186,27 +186,31 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 5. 核心計算函數 (v6.4 修復版) ---
+# --- 5. 核心計算函數 (v6.4 數學運算修正) ---
 def calculate_adx(df, window=14):
     try:
-        high = df['High']; low = df['Low']; close = df['Close']
+        high, low, close = df['High'], df['Low'], df['Close']
         up_move = high.diff(); down_move = -low.diff()
+        
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
         
         plus_dm = pd.Series(plus_dm, index=df.index)
         minus_dm = pd.Series(minus_dm, index=df.index)
         
-        tr1 = high - low; tr2 = abs(high - close.shift(1)); tr3 = abs(low - close.shift(1))
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
         atr = tr.rolling(window).mean()
         
         plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
         
-        # ★ 關鍵修正：棄用 .replace()，改用數學運算加極小值避免除以零
+        # ★ 關鍵修正：使用數學運算避免除以零，棄用 replace
         sum_di = abs(plus_di + minus_di)
-        sum_di = sum_di + 1e-9 
+        sum_di = sum_di + 1e-9 # 極小值防呆
         
         dx = (abs(plus_di - minus_di) / sum_di) * 100
         adx = dx.rolling(window).mean()
@@ -217,7 +221,7 @@ def calculate_adx(df, window=14):
 
 def calculate_atr(df, window=14):
     try:
-        high = df['High']; low = df['Low']; close = df['Close']
+        high, low, close = df['High'], df['Low'], df['Close']
         tr1 = high - low; tr2 = abs(high - close.shift(1)); tr3 = abs(low - close.shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         return tr.rolling(window).mean()
@@ -290,7 +294,7 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# --- 7. 繪圖引擎 (OO模式+數學修復) ---
+# --- 7. 繪圖引擎 (OO模式) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file, result_text = None, ""
@@ -298,9 +302,8 @@ def create_stock_chart(stock_code):
     # 鎖定
     with plot_lock:
         try:
-            # 移除 plt 指令，使用純 OO 繪圖
-            # plt.close('all') # 移除
-            # plt.clf()        # 移除
+            plt.close('all')
+            plt.clf()
             
             raw_code = stock_code.upper().strip()
             # 1. 取得資料
@@ -356,7 +359,6 @@ def create_stock_chart(stock_code):
             df['Vol_MA20'] = df['Volume'].rolling(20).mean()
             df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
             
-            # 使用修復後的計算函數
             df['ADX'] = calculate_adx(df)
             df['ATR'] = calculate_atr(df)
             df['OBV'] = calculate_obv(df)
@@ -463,7 +465,7 @@ def create_stock_chart(stock_code):
 
     return result_file, result_text
 
-# --- 8. 選股功能 ---
+# --- 8. 選股功能 (略，同前) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
