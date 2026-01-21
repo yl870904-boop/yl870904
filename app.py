@@ -19,7 +19,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v6.0 語法修正版 (修復啟動錯誤)"
+APP_VERSION = "v6.1 結構修復版 (修正縮排錯誤)"
 
 # --- 設定日誌顯示 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -292,15 +292,18 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# --- 7. 繪圖引擎 (v5.9 修復版 - 含鎖定與回收) ---
+# --- 7. 繪圖引擎 (v6.1 結構修復版) ---
 def create_stock_chart(stock_code):
-    # ★ 關鍵：強制回收記憶體
-    gc.collect()
+    gc.collect() # 確保記憶體回收
     
-    # ★ 關鍵：進入鎖定區域，確保一次只畫一張圖
+    # 建立一個變數來存放可能的錯誤訊息或結果
+    result_file = None
+    result_text = ""
+    
+    # 鎖定以確保單執行緒繪圖
     with plot_lock:
         try:
-            # 強制關閉所有舊圖表
+            # 清理
             plt.close('all')
             plt.clf()
             
@@ -341,7 +344,7 @@ def create_stock_chart(stock_code):
             if len(df) < 60:
                 logger.warning(f"{target} 資料不足 60 筆，僅計算短期指標")
                 df['MA20'] = df['Close'].rolling(window=20).mean()
-                df['MA60'] = df['MA20'] # 暫代
+                df['MA60'] = df['MA20']
             else:
                 df['MA20'] = df['Close'].rolling(window=20).mean()
                 df['MA60'] = df['Close'].rolling(window=60).mean()
@@ -377,7 +380,6 @@ def create_stock_chart(stock_code):
             ma20 = df['MA20'].iloc[-1]
             ma60 = df['MA60'].iloc[-1]
             
-            # 處理 NaN
             if pd.isna(ma20): ma20 = current_price
             if pd.isna(ma60): ma60 = current_price
             
@@ -448,70 +450,76 @@ def create_stock_chart(stock_code):
                 f"💡 建議: {advice}\n"
                 f"(看不懂名詞？輸入「說明」看教學)"
             )
+            result_text = analysis_report
 
             # --- 繪圖 (Agg模式) ---
             logger.info(f"🎨 繪製圖表細節: {target}")
-            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
-
-            # 使用預設字型以防萬一
-            plot_font = my_font if my_font else None
-
-            ax1.plot(df.index, df['Close'], color='black', alpha=0.6, linewidth=1, label='收盤價')
-            if len(df) >= 20: ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='月線')
-            if len(df) >= 60: ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='季線')
             
-            if len(df) > 60:
-                ax1.plot(golden.index, golden['MA20'], '^', color='red', markersize=14, markeredgecolor='black', label='黃金交叉')
-                ax1.plot(death.index, death['MA20'], 'v', color='green', markersize=14, markeredgecolor='black', label='死亡交叉')
-            
-            # 使用 fallback 字型
             try:
-                ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=plot_font, fontweight='bold')
-            except:
-                ax1.set_title(f"{target} Analysis", fontsize=22)
+                fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
 
-            ax1.legend(loc='upper left', prop=plot_font)
-            ax1.grid(True, linestyle=':', alpha=0.5)
+                # 使用預設字型以防萬一
+                plot_font = my_font if my_font else None
 
-            colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
-            ax2.bar(df.index, df['Volume'], color=colors, alpha=0.8)
-            ax2.plot(df.index, df['Vol_MA20'], color='blue', linewidth=1.5, label='20日均量')
-            ax2.set_ylabel("成交量", fontproperties=plot_font)
-            ax2.legend(loc='upper right', prop=plot_font)
-            ax2.grid(True, linestyle=':', alpha=0.3)
+                ax1.plot(df.index, df['Close'], color='black', alpha=0.6, linewidth=1, label='收盤價')
+                if len(df) >= 20: ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='月線')
+                if len(df) >= 60: ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='季線')
+                
+                if len(df) > 60:
+                    ax1.plot(golden.index, golden['MA20'], '^', color='red', markersize=14, markeredgecolor='black', label='黃金交叉')
+                    ax1.plot(death.index, death['MA20'], 'v', color='green', markersize=14, markeredgecolor='black', label='死亡交叉')
+                
+                try:
+                    ax1.set_title(f"{stock_name} ({target}) 實戰分析圖", fontsize=22, fontproperties=plot_font, fontweight='bold')
+                except:
+                    ax1.set_title(f"{target} Analysis", fontsize=22)
 
-            ax3.plot(df.index, df['RSI'], color='purple', linewidth=1.5, label='RSI')
-            ax3.axhline(80, color='red', linestyle='--', alpha=0.5)
-            ax3.axhline(60, color='orange', linestyle='--', alpha=0.5)
-            ax3.axhline(30, color='green', linestyle='--', alpha=0.5)
-            ax3.set_ylabel("RSI", fontproperties=plot_font)
-            ax3.grid(True, linestyle=':', alpha=0.3)
-            ax3.set_ylim(0, 100)
+                ax1.legend(loc='upper left', prop=plot_font)
+                ax1.grid(True, linestyle=':', alpha=0.5)
 
-            fig.autofmt_xdate()
-            
-            filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
-            filepath = os.path.join(static_dir, filename)
-            
-            logger.info(f"💾 正在存檔: {filepath}")
-            plt.savefig(filepath, bbox_inches='tight')
-            logger.info("✅ 存檔完成")
-            
-            return filename, analysis_report
-            
-        except Exception as plot_err:
-            logger.error(f"❌ 畫圖失敗 (Plot Error): {plot_err}")
-            return None, f"繪圖失敗 ({str(plot_err)})，但分析正常：\n\n{analysis_report}"
-        finally:
-            plt.close('all')
-            plt.clf()
-            gc.collect()
+                colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
+                ax2.bar(df.index, df['Volume'], color=colors, alpha=0.8)
+                ax2.plot(df.index, df['Vol_MA20'], color='blue', linewidth=1.5, label='20日均量')
+                ax2.set_ylabel("成交量", fontproperties=plot_font)
+                ax2.legend(loc='upper right', prop=plot_font)
+                ax2.grid(True, linestyle=':', alpha=0.3)
 
-    except Exception as e:
-        logger.error(f"❌ create_stock_chart 嚴重錯誤: {traceback.format_exc()}")
-        return None, f"分析失敗: {str(e)}"
+                ax3.plot(df.index, df['RSI'], color='purple', linewidth=1.5, label='RSI')
+                ax3.axhline(80, color='red', linestyle='--', alpha=0.5)
+                ax3.axhline(60, color='orange', linestyle='--', alpha=0.5)
+                ax3.axhline(30, color='green', linestyle='--', alpha=0.5)
+                ax3.set_ylabel("RSI", fontproperties=plot_font)
+                ax3.grid(True, linestyle=':', alpha=0.3)
+                ax3.set_ylim(0, 100)
 
-# --- 7. 選股功能 (修正語法錯誤) ---
+                fig.autofmt_xdate()
+                
+                filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
+                filepath = os.path.join(static_dir, filename)
+                
+                logger.info(f"💾 正在存檔: {filepath}")
+                plt.savefig(filepath, bbox_inches='tight')
+                logger.info("✅ 存檔完成")
+                
+                result_file = filename
+
+            except Exception as plot_err:
+                logger.error(f"❌ 畫圖子程序失敗: {plot_err}")
+                result_file = None
+                result_text = f"繪圖失敗 ({str(plot_err)})，但分析正常：\n\n{analysis_report}"
+            finally:
+                plt.close('all')
+                plt.clf()
+
+        except Exception as inner_e:
+            logger.error(f"❌ 分析計算過程失敗: {inner_e}")
+            return None, f"分析錯誤: {str(inner_e)}"
+
+    # 鎖定結束後回傳結果
+    return result_file, result_text
+
+# --- 7. 選股功能 (略，同 v5.4，請保留完整版) ---
+# ... (請將 v5.4 的 scan_potential_stocks 複製到這裡) ...
 def scan_potential_stocks(max_price=None, sector_name=None):
     logger.info(f"🔎 開始掃描股票: {sector_name or '百元績優'}")
     
@@ -624,7 +632,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
     return title_prefix, recommendations
 
-# --- 8. Line Bot 路由與處理 ---
+# --- 8. Line Bot 路由與處理 (v5.6 防彈版) ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
@@ -726,6 +734,7 @@ def handle_message(event):
             text = f"🎲 {prefix}潛力股\n(Score評分制)\n====================\n" + "\n\n".join(res) if res else "運氣不好，沒找到強勢股。"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         else:
+            # 個股診斷 (重點修復區)
             img, txt = create_stock_chart(user_msg)
             if img:
                 url = request.host_url.replace("http://", "https://") + 'images/' + img
