@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
-# ★ 改用物件導向繪圖，解決雲端崩潰問題
+# ★ 改用物件導向繪圖
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.font_manager import FontProperties
@@ -14,20 +14,24 @@ import logging
 import traceback
 import sys
 import gc
+import threading
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v6.2 終極繪圖修正版 (OO模式+畫布優化)"
+APP_VERSION = "v6.3 數學防呆版 (修復 numpy replace 錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# --- 設定 matplotlib 後端 (必要) ---
+# --- 設定 matplotlib 後端 ---
 matplotlib.use('Agg')
+
+# 全域繪圖鎖
+plot_lock = threading.Lock()
 
 app = Flask(__name__)
 
@@ -61,7 +65,7 @@ if not os.path.exists(font_file):
 try:
     my_font = FontProperties(fname=font_file)
 except:
-    my_font = None # Fallback
+    my_font = None
 
 # --- 3. 全域快取 ---
 EPS_CACHE = {}
@@ -182,28 +186,43 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 5. 計算指標函數 ---
+# --- 5. 核心計算函數 ---
 def calculate_adx(df, window=14):
     try:
         high, low, close = df['High'], df['Low'], df['Close']
-        up, down = high.diff(), -low.diff()
-        plus_dm = np.where((up > down) & (up > 0), up, 0.0)
-        minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+        up_move = high.diff()
+        down_move = -low.diff()
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+        
         tr1 = high - low
         tr2 = abs(high - close.shift(1))
         tr3 = abs(low - close.shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
         atr = tr.rolling(window).mean()
-        plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(window).mean() / atr)
-        minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(window).mean() / atr)
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1)) * 100
-        return dx.rolling(window).mean()
+        
+        plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
+        
+        # ★ 關鍵修正：使用數學方式避免除以零，不使用 .replace()
+        sum_di = abs(plus_di + minus_di)
+        sum_di = sum_di + 1e-9 # 加一個極小值避免分母為0
+        
+        dx = (abs(plus_di - minus_di) / sum_di) * 100
+        adx = dx.rolling(window).mean()
+        return adx
     except: return pd.Series([0]*len(df), index=df.index)
 
 def calculate_atr(df, window=14):
     try:
-        high, low, close = df['High'], df['Low'], df['Close']
-        tr = pd.concat([high-low, abs(high-close.shift(1)), abs(low-close.shift(1))], axis=1).max(axis=1)
+        high = df['High']; low = df['Low']; close = df['Close']
+        tr1 = high - low; tr2 = abs(high - close.shift(1)); tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         return tr.rolling(window).mean()
     except: return pd.Series([0]*len(df), index=df.index)
 
@@ -226,7 +245,8 @@ def detect_market_state(index_df):
     if index_df.empty: return 'RANGE'
     last = index_df.iloc[-1]
     adx = calculate_adx(index_df).iloc[-1]
-    atr_pct = (calculate_atr(index_df).iloc[-1] / last['Close']) if last['Close'] > 0 else 0
+    atr = calculate_atr(index_df).iloc[-1]
+    atr_pct = (atr / last['Close']) if last['Close'] > 0 else 0
     ma20 = index_df['Close'].rolling(20).mean().iloc[-1]
     ma60 = index_df['Close'].rolling(60).mean().iloc[-1]
     
