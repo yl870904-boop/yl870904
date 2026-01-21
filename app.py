@@ -21,7 +21,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v6.7 最終完結版 (移除殘留 plt 指令)"
+APP_VERSION = "v6.8 最終完美修復版 (修復變數衝突與ADX錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -186,7 +186,7 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 5. 核心計算函數 ---
+# --- 5. 核心計算函數 (v6.8 數學運算修正) ---
 def calculate_adx(df, window=14):
     try:
         high, low, close = df['High'], df['Low'], df['Close']
@@ -208,9 +208,9 @@ def calculate_adx(df, window=14):
         plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
         
-        # 使用數學方式避免除以零，不使用 replace
+        # ★ 關鍵修正：使用數學運算避免除以零，棄用 replace
         sum_di = abs(plus_di + minus_di)
-        sum_di = sum_di + 1e-9 
+        sum_di = sum_di + 1e-9 # 極小值防呆
         
         dx = (abs(plus_di - minus_di) / sum_di) * 100
         adx = dx.rolling(window).mean()
@@ -294,7 +294,7 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# --- 7. 繪圖引擎 (OO模式+修復) ---
+# --- 7. 繪圖引擎 (OO模式+修復變數衝突) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file, result_text = None, ""
@@ -303,8 +303,8 @@ def create_stock_chart(stock_code):
     with plot_lock:
         try:
             # 移除所有 plt 指令
-            # plt.close('all') # Deleted
-            # plt.clf() # Deleted
+            # plt.close('all') 
+            # plt.clf()
             
             raw_code = stock_code.upper().strip()
             # 1. 取得資料
@@ -389,7 +389,8 @@ def create_stock_chart(stock_code):
 
             stop_loss = price - atr * 1.5
             final_stop = max(stop_loss, ma20) if trend_dir == "多頭" and ma20 < price else stop_loss
-            target = price + atr * 3
+            # ★ 變數改名為 target_price，避免覆蓋上面的 target 股票代號
+            target_price = price + atr * 3
 
             advice = "觀望"
             if trend_dir == "多頭":
@@ -408,7 +409,7 @@ def create_stock_chart(stock_code):
                 f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
                 f"🌊 動能: {vol_ratio:.1f}\n"
                 f"------------------\n"
-                f"🎯 目標: {target:.1f} | 🛑 停損: {final_stop:.1f}\n"
+                f"🎯 目標: {target_price:.1f} | 🛑 停損: {final_stop:.1f}\n"
                 f"💡 建議: {advice}\n"
                 f"(輸入「說明」看名詞解釋)"
             )
@@ -459,6 +460,8 @@ def create_stock_chart(stock_code):
         except Exception as e:
             return None, f"繪圖失敗: {str(e)}\n\n{result_text}"
         finally:
+            # plt.close('all') # Removed
+            # plt.clf() # Removed
             gc.collect()
 
     return result_file, result_text
