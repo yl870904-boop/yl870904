@@ -21,7 +21,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v6.3 數學防呆版 (修復 numpy replace 錯誤)"
+APP_VERSION = "v6.4 數學運算修復版 (徹底解決 replace 錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -186,37 +186,34 @@ def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
     return CODE_NAME_MAP.get(code_only, stock_code)
 
-# --- 5. 核心計算函數 ---
+# --- 5. 核心計算函數 (v6.4 修復版) ---
 def calculate_adx(df, window=14):
     try:
-        high, low, close = df['High'], df['Low'], df['Close']
-        up_move = high.diff()
-        down_move = -low.diff()
-        
+        high = df['High']; low = df['Low']; close = df['Close']
+        up_move = high.diff(); down_move = -low.diff()
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
         
         plus_dm = pd.Series(plus_dm, index=df.index)
         minus_dm = pd.Series(minus_dm, index=df.index)
         
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
+        tr1 = high - low; tr2 = abs(high - close.shift(1)); tr3 = abs(low - close.shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
         atr = tr.rolling(window).mean()
         
         plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
         
-        # ★ 關鍵修正：使用數學方式避免除以零，不使用 .replace()
+        # ★ 關鍵修正：棄用 .replace()，改用數學運算加極小值避免除以零
         sum_di = abs(plus_di + minus_di)
-        sum_di = sum_di + 1e-9 # 加一個極小值避免分母為0
+        sum_di = sum_di + 1e-9 
         
         dx = (abs(plus_di - minus_di) / sum_di) * 100
         adx = dx.rolling(window).mean()
         return adx
-    except: return pd.Series([0]*len(df), index=df.index)
+    except Exception as e: 
+        logger.error(f"ADX計算錯誤: {e}")
+        return pd.Series([0]*len(df), index=df.index)
 
 def calculate_atr(df, window=14):
     try:
@@ -293,166 +290,172 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# --- 7. 繪圖引擎 (OO模式) ---
+# --- 7. 繪圖引擎 (OO模式+數學修復) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file, result_text = None, ""
     
-    try:
-        raw_code = stock_code.upper().strip()
-        # 1. 取得資料
-        if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
-            target = raw_code
-            ticker = yf.Ticker(target)
-        else:
-            target = raw_code + ".TW"
-            ticker = yf.Ticker(target)
-        
-        df = fetch_data_with_retry(ticker, period="1y")
-        
-        if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
-            target_two = raw_code + ".TWO"
-            ticker_two = yf.Ticker(target_two)
-            df = fetch_data_with_retry(ticker_two, period="1y")
-            if not df.empty:
-                target = target_two
-                ticker = ticker_two
-        
-        if df.empty: return None, "系統繁忙或找不到代號。"
-        
-        stock_name = get_stock_name(target)
-        eps = get_eps_cached(target)
-
-        # 抓大盤 RS (簡化版，失敗不卡)
+    # 鎖定
+    with plot_lock:
         try:
-            bench = yf.Ticker("0050.TW").history(period="1y")
-            common = df.index.intersection(bench.index)
-            if len(common) > 20:
-                s_ret = df.loc[common, 'Close'].pct_change(20)
-                b_ret = bench.loc[common, 'Close'].pct_change(20)
-                df.loc[common, 'RS'] = (1+s_ret)/(1+b_ret)
-            else: df['RS'] = 1.0
-        except: df['RS'] = 1.0
-
-        # 指標
-        if len(df) < 60:
-            df['MA20'] = df['Close'].rolling(20).mean()
-            df['MA60'] = df['MA20']
-        else:
-            df['MA20'] = df['Close'].rolling(20).mean()
-            df['MA60'] = df['Close'].rolling(60).mean()
-        
-        df['Slope'] = df['MA20'].diff(5)
-        
-        delta = df['Close'].diff()
-        gain = (delta.where(delta>0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta<0, 0)).rolling(14).mean()
-        rs_idx = gain / loss
-        df['RSI'] = 100 - (100/(1+rs_idx))
-        
-        df['Vol_MA20'] = df['Volume'].rolling(20).mean()
-        df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
-        
-        df['ADX'] = calculate_adx(df)
-        df['ATR'] = calculate_atr(df)
-        df['OBV'] = calculate_obv(df)
-
-        # 策略判斷
-        last = df.iloc[-1]
-        price = last['Close']
-        ma20, ma60 = last['MA20'], last['MA60']
-        slope = last['Slope'] if not pd.isna(last['Slope']) else 0
-        rsi = last['RSI'] if not pd.isna(last['RSI']) else 50
-        adx = last['ADX'] if not pd.isna(last['ADX']) else 0
-        atr = last['ATR'] if not pd.isna(last['ATR']) and last['ATR'] > 0 else price*0.02
-        rs_val = last['RS'] if 'RS' in df.columns and not pd.isna(last['RS']) else 1.0
-        vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
-
-        if adx < 20: trend_quality = "盤整 💤"
-        elif adx > 40: trend_quality = "趨勢強勁 🔥"
-        else: trend_quality = "趨勢確立 ✅"
-
-        if ma20 > ma60 and slope > 0: trend_dir = "多頭"
-        elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
-        else: trend_dir = "震盪"
-
-        if rs_val > 1.05: rs_str = "強於大盤 🦅"
-        elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
-        else: rs_str = "跟隨大盤"
-
-        stop_loss = price - atr * 1.5
-        final_stop = max(stop_loss, ma20) if trend_dir == "多頭" and ma20 < price else stop_loss
-        target = price + atr * 3
-
-        advice = "觀望"
-        if trend_dir == "多頭":
-            if adx < 20: advice = "盤整股，觀望"
-            elif rs_val < 1: advice = "趨勢好但跑輸大盤"
-            elif vol_ratio > 3: advice = "短線爆量過熱"
-            elif rsi < 40: advice = "回檔中，等止跌"
-            elif 60 <= rsi <= 75: advice = "量價健康，可佈局"
-            else: advice = "沿月線操作"
-        elif trend_dir == "空頭": advice = "趨勢向下，勿接刀"
-        
-        result_text = (
-            f"📊 {stock_name} ({target}) 實戰診斷\n"
-            f"💰 現價: {price:.1f} | EPS: {eps}\n"
-            f"📈 趨勢: {trend_dir} | {trend_quality}\n"
-            f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
-            f"🌊 動能: {vol_ratio:.1f}\n"
-            f"------------------\n"
-            f"🎯 目標: {target:.1f} | 🛑 停損: {final_stop:.1f}\n"
-            f"💡 建議: {advice}\n"
-            f"(輸入「說明」看名詞解釋)"
-        )
-
-        # ★ 純 OO 繪圖 (無 plt)
-        fig = Figure(figsize=(10, 10))
-        canvas = FigureCanvas(fig)
-        
-        ax1 = fig.add_subplot(3, 1, 1)
-        ax1.plot(df.index, df['Close'], color='black', alpha=0.6, label='Price')
-        if len(df) >= 20: ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='MA20')
-        if len(df) >= 60: ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='MA60')
-        
-        # 標題字型處理
-        title_prop = my_font if my_font else None
-        try:
-            ax1.set_title(f"{stock_name} ({target}) 實戰分析", fontproperties=title_prop, fontsize=18)
-        except:
-            ax1.set_title(f"{target} Analysis", fontsize=18)
+            plt.close('all')
+            plt.clf()
             
-        ax1.legend(loc='upper left', prop=title_prop)
-        ax1.grid(True, linestyle=':', alpha=0.5)
+            raw_code = stock_code.upper().strip()
+            # 1. 取得資料
+            if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
+                target = raw_code
+                ticker = yf.Ticker(target)
+            else:
+                target = raw_code + ".TW"
+                ticker = yf.Ticker(target)
+            
+            df = fetch_data_with_retry(ticker, period="1y")
+            
+            if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
+                target_two = raw_code + ".TWO"
+                ticker_two = yf.Ticker(target_two)
+                df = fetch_data_with_retry(ticker_two, period="1y")
+                if not df.empty:
+                    target = target_two
+                    ticker = ticker_two
+            
+            if df.empty: return None, "系統繁忙或找不到代號。"
+            
+            stock_name = get_stock_name(target)
+            eps = get_eps_cached(target)
 
-        ax2 = fig.add_subplot(3, 1, 2)
-        cols = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
-        ax2.bar(df.index, df['Volume'], color=cols, alpha=0.8)
-        ax2.plot(df.index, df['Vol_MA20'], color='blue')
-        ax2.set_ylabel("Volume", fontproperties=title_prop)
-        ax2.grid(True, linestyle=':', alpha=0.3)
+            # 抓大盤 RS
+            try:
+                bench = yf.Ticker("0050.TW").history(period="1y")
+                common = df.index.intersection(bench.index)
+                if len(common) > 20:
+                    s_ret = df.loc[common, 'Close'].pct_change(20)
+                    b_ret = bench.loc[common, 'Close'].pct_change(20)
+                    df.loc[common, 'RS'] = (1+s_ret)/(1+b_ret)
+                else: df['RS'] = 1.0
+            except: df['RS'] = 1.0
 
-        ax3 = fig.add_subplot(3, 1, 3)
-        ax3.plot(df.index, df['RSI'], color='purple')
-        ax3.axhline(80, color='red', linestyle='--')
-        ax3.axhline(30, color='green', linestyle='--')
-        ax3.set_ylabel("RSI", fontproperties=title_prop)
-        ax3.grid(True, linestyle=':', alpha=0.3)
+            # 指標
+            if len(df) < 60:
+                df['MA20'] = df['Close'].rolling(20).mean()
+                df['MA60'] = df['MA20']
+            else:
+                df['MA20'] = df['Close'].rolling(20).mean()
+                df['MA60'] = df['Close'].rolling(60).mean()
+            
+            df['Slope'] = df['MA20'].diff(5)
+            
+            delta = df['Close'].diff()
+            gain = (delta.where(delta>0, 0)).rolling(14).mean()
+            loss = (-delta.where(delta<0, 0)).rolling(14).mean()
+            rs_idx = gain / loss
+            df['RSI'] = 100 - (100/(1+rs_idx))
+            
+            df['Vol_MA20'] = df['Volume'].rolling(20).mean()
+            df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
+            
+            # 使用修復後的計算函數
+            df['ADX'] = calculate_adx(df)
+            df['ATR'] = calculate_atr(df)
+            df['OBV'] = calculate_obv(df)
 
-        fig.autofmt_xdate()
-        
-        filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
-        filepath = os.path.join(static_dir, filename)
-        fig.savefig(filepath, bbox_inches='tight')
-        
-        result_file = filename
+            # 策略判斷
+            last = df.iloc[-1]
+            price = last['Close']
+            ma20, ma60 = last['MA20'], last['MA60']
+            slope = last['Slope'] if not pd.isna(last['Slope']) else 0
+            rsi = last['RSI'] if not pd.isna(last['RSI']) else 50
+            adx = last['ADX'] if not pd.isna(last['ADX']) else 0
+            atr = last['ATR'] if not pd.isna(last['ATR']) and last['ATR'] > 0 else price*0.02
+            rs_val = last['RS'] if 'RS' in df.columns and not pd.isna(last['RS']) else 1.0
+            vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
 
-    except Exception as e:
-        return None, f"繪圖失敗: {str(e)}\n\n{result_text}"
+            if adx < 20: trend_quality = "盤整 💤"
+            elif adx > 40: trend_quality = "趨勢強勁 🔥"
+            else: trend_quality = "趨勢確立 ✅"
+
+            if ma20 > ma60 and slope > 0: trend_dir = "多頭"
+            elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
+            else: trend_dir = "震盪"
+
+            if rs_val > 1.05: rs_str = "強於大盤 🦅"
+            elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
+            else: rs_str = "跟隨大盤"
+
+            stop_loss = price - atr * 1.5
+            final_stop = max(stop_loss, ma20) if trend_dir == "多頭" and ma20 < price else stop_loss
+            target = price + atr * 3
+
+            advice = "觀望"
+            if trend_dir == "多頭":
+                if adx < 20: advice = "盤整股，觀望"
+                elif rs_val < 1: advice = "趨勢好但跑輸大盤"
+                elif vol_ratio > 3: advice = "短線爆量過熱"
+                elif rsi < 40: advice = "回檔中，等止跌"
+                elif 60 <= rsi <= 75: advice = "量價健康，可佈局"
+                else: advice = "沿月線操作"
+            elif trend_dir == "空頭": advice = "趨勢向下，勿接刀"
+            
+            result_text = (
+                f"📊 {stock_name} ({target}) 實戰診斷\n"
+                f"💰 現價: {price:.1f} | EPS: {eps}\n"
+                f"📈 趨勢: {trend_dir} | {trend_quality}\n"
+                f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
+                f"🌊 動能: {vol_ratio:.1f}\n"
+                f"------------------\n"
+                f"🎯 目標: {target:.1f} | 🛑 停損: {final_stop:.1f}\n"
+                f"💡 建議: {advice}\n"
+                f"(輸入「說明」看名詞解釋)"
+            )
+
+            # OO 繪圖
+            fig = Figure(figsize=(10, 10))
+            canvas = FigureCanvas(fig)
+            
+            ax1 = fig.add_subplot(3, 1, 1)
+            ax1.plot(df.index, df['Close'], color='black', alpha=0.6, label='Price')
+            if len(df) >= 20: ax1.plot(df.index, df['MA20'], color='#FF9900', linestyle='--', label='MA20')
+            if len(df) >= 60: ax1.plot(df.index, df['MA60'], color='#0066CC', linewidth=2, label='MA60')
+            
+            title_prop = my_font if my_font else None
+            try:
+                ax1.set_title(f"{stock_name} ({target}) 實戰分析", fontproperties=title_prop, fontsize=18)
+            except:
+                ax1.set_title(f"{target} Analysis", fontsize=18)
+                
+            ax1.legend(loc='upper left', prop=title_prop)
+            ax1.grid(True, linestyle=':', alpha=0.5)
+
+            ax2 = fig.add_subplot(3, 1, 2)
+            cols = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
+            ax2.bar(df.index, df['Volume'], color=cols, alpha=0.8)
+            ax2.plot(df.index, df['Vol_MA20'], color='blue')
+            ax2.set_ylabel("Volume", fontproperties=title_prop)
+            ax2.grid(True, linestyle=':', alpha=0.3)
+
+            ax3 = fig.add_subplot(3, 1, 3)
+            ax3.plot(df.index, df['RSI'], color='purple')
+            ax3.axhline(80, color='red', linestyle='--')
+            ax3.axhline(30, color='green', linestyle='--')
+            ax3.set_ylabel("RSI", fontproperties=title_prop)
+            ax3.grid(True, linestyle=':', alpha=0.3)
+
+            fig.autofmt_xdate()
+            
+            filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
+            filepath = os.path.join(static_dir, filename)
+            fig.savefig(filepath, bbox_inches='tight')
+            
+            result_file = filename
+
+        except Exception as e:
+            logger.error(f"繪圖錯誤: {e}")
+            return None, f"繪圖失敗: {str(e)}\n\n{result_text}"
 
     return result_file, result_text
 
-# --- 8. 選股功能 (略，同前) ---
+# --- 8. 選股功能 ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
