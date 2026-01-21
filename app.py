@@ -11,15 +11,15 @@ import random
 import logging
 import traceback
 import sys
-import threading # ★ 新增：執行緒鎖定
-import gc        # ★ 新增：強制記憶體回收
+import threading
+import gc
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v5.9 繪圖救援版 (加入排隊鎖+記憶體回收)"
+APP_VERSION = "v6.0 語法修正版 (修復啟動錯誤)"
 
 # --- 設定日誌顯示 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # --- 設定 matplotlib 後端 ---
 matplotlib.use('Agg')
 
-# ★ 建立全域繪圖鎖 (關鍵修正：防止多執行緒同時畫圖導致崩潰)
+# 全域繪圖鎖
 plot_lock = threading.Lock()
 
 app = Flask(__name__)
@@ -48,28 +48,25 @@ static_dir = 'static_images'
 if not os.path.exists(static_dir):
     try:
         os.makedirs(static_dir)
-        logger.info(f"建立圖片目錄: {static_dir}")
     except Exception as e:
         logger.error(f"❌ 無法建立圖片目錄: {e}")
 
 font_file = 'TaipeiSansTCBeta-Regular.ttf'
 if not os.path.exists(font_file):
-    logger.info("找不到字型檔，正在下載...")
     try:
         import urllib.request
         url = "https://drive.google.com/uc?id=1eGAsTN1HBpJAkeVM57_C7ccp7hbgSz3_&export=download"
         urllib.request.urlretrieve(url, font_file)
-        logger.info("✅ 字型下載成功")
     except Exception as e:
         logger.error(f"❌ 字型下載失敗: {e}")
 
 try:
     my_font = FontProperties(fname=font_file)
 except:
-    logger.warning("⚠️ 字型載入失敗，將使用預設字型 (中文可能亂碼)")
+    logger.warning("⚠️ 字型載入失敗，將使用預設字型")
     my_font = None
 
-# --- 3. 全域快取 (EPS Cache) ---
+# --- 3. 全域快取 ---
 EPS_CACHE = {}
 
 def get_eps_cached(ticker_symbol):
@@ -81,10 +78,9 @@ def get_eps_cached(ticker_symbol):
         EPS_CACHE[ticker_symbol] = eps
         return eps
     except Exception as e:
-        logger.warning(f"EPS 查詢失敗 ({ticker_symbol}): {e}")
         return 'N/A'
 
-# --- 4. 資料庫定義 (完整版) ---
+# --- 4. 資料庫定義 ---
 SECTOR_DICT = {
     "百元績優": [
         '2303.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '2409.TW', '3481.TW', 
@@ -505,10 +501,8 @@ def create_stock_chart(stock_code):
             
         except Exception as plot_err:
             logger.error(f"❌ 畫圖失敗 (Plot Error): {plot_err}")
-            # 如果畫圖失敗，嘗試只回傳文字報告
-            return None, f"繪圖失敗 (系統忙碌)，但數據分析正常：\n\n{analysis_report}"
+            return None, f"繪圖失敗 ({str(plot_err)})，但分析正常：\n\n{analysis_report}"
         finally:
-            # 無論成功失敗，一定要關閉畫布並回收記憶體
             plt.close('all')
             plt.clf()
             gc.collect()
@@ -517,14 +511,15 @@ def create_stock_chart(stock_code):
         logger.error(f"❌ create_stock_chart 嚴重錯誤: {traceback.format_exc()}")
         return None, f"分析失敗: {str(e)}"
 
-# --- 7. 選股功能 (略，同 v5.4，請保留完整版) ---
-# ... (請將 v5.4 的 scan_potential_stocks 複製到這裡) ...
+# --- 7. 選股功能 (修正語法錯誤) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     logger.info(f"🔎 開始掃描股票: {sector_name or '百元績優'}")
     
     if sector_name == "隨機":
         all_s = set()
-        for s in SECTOR_DICT.values(): for x in s: all_s.add(x)
+        for s in SECTOR_DICT.values():
+            for x in s:
+                all_s.add(x)
         watch_list = random.sample(list(all_s), min(30, len(all_s)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
@@ -629,7 +624,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
     return title_prefix, recommendations
 
-# --- 8. Line Bot 路由與處理 (v5.6 防彈版) ---
+# --- 8. Line Bot 路由與處理 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
@@ -666,11 +661,6 @@ def handle_message(event):
     try:
         if not user_msg: return
 
-        # ... (中間的新手教學、功能選單、選股邏輯 與 v5.5 相同，省略) ...
-        # 請確保這裡有 sector_hit 和 user_msg=="推薦" 的判斷邏輯
-        # ...
-        
-        # 為了完整性，這裡補上選股邏輯的判斷區塊
         if user_msg in ["說明", "教學", "名詞解釋", "新手", "看不懂"]:
             tutorial_plus = (
                 "🎓 **股市小白 專有名詞懶人包**\n"
@@ -736,7 +726,6 @@ def handle_message(event):
             text = f"🎲 {prefix}潛力股\n(Score評分制)\n====================\n" + "\n\n".join(res) if res else "運氣不好，沒找到強勢股。"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         else:
-            # 個股診斷 (重點修復區)
             img, txt = create_stock_chart(user_msg)
             if img:
                 url = request.host_url.replace("http://", "https://") + 'images/' + img
