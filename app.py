@@ -16,19 +16,20 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
-# --- 設定應用程式版本 (請確認 Line 回傳此版本號) ---
-APP_VERSION = "v5.7 最終確認版 (記憶體優化+上櫃修復)"
+# --- 設定應用程式版本 ---
+APP_VERSION = "v5.8 緊急修復版 (修正語法錯誤)"
 
 # --- 設定日誌顯示 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# --- 設定 matplotlib 後端 (重要：避免 GUI 錯誤) ---
+# --- 設定 matplotlib 後端 ---
 matplotlib.use('Agg')
 
 app = Flask(__name__)
 
 # --- 1. 設定密鑰 ---
+# 優先從環境變數讀取，若無則使用預設值 (建議在 Render 後台設定)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '(REMOVED_LINE_TOKEN)')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '(REMOVED_LINE_SECRET)')
 
@@ -514,7 +515,9 @@ def scan_potential_stocks(max_price=None, sector_name=None):
     
     if sector_name == "隨機":
         all_s = set()
-        for s in SECTOR_DICT.values(): for x in s: all_s.add(x)
+        for s in SECTOR_DICT.values():
+            for x in s:
+                all_s.add(x)
         watch_list = random.sample(list(all_s), min(30, len(all_s)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
