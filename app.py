@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v14.0 穩定架構版 (繪圖防崩潰+降級回報)"
+APP_VERSION = "v14.1 緊急修復版 (修正巢狀迴圈語法錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -242,7 +242,7 @@ def get_stock_name(stock_code):
 # --- 5. 核心計算函數 ---
 def calculate_adx(df, window=14):
     try:
-        high, low, close = df['High'], df['Low'], df['Close']
+        high = df['High']; low = df['Low']; close = df['Close']
         up_move = high.diff(); down_move = -low.diff()
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
@@ -260,7 +260,7 @@ def calculate_adx(df, window=14):
 
 def calculate_atr(df, window=14):
     try:
-        high, low, close = df['High'], df['Low'], df['Close']
+        high = df['High']; low = df['Low']; close = df['Close']
         tr = pd.concat([high-low, abs(high-close.shift(1)), abs(low-close.shift(1))], axis=1).max(axis=1)
         return tr.rolling(window).mean()
     except: return pd.Series([0]*len(df), index=df.index)
@@ -272,54 +272,11 @@ def calculate_obv(df):
 def fetch_data_with_retry(ticker, period="1y", retries=3, delay=1):
     for i in range(retries):
         try:
-            logger.info(f"⏳ 抓取 {ticker.ticker} (試{i+1})...")
             df = ticker.history(period=period)
             if not df.empty: return df
             time.sleep(0.5)
         except Exception: time.sleep(delay * (i + 1))
     return pd.DataFrame()
-
-# --- ★ K線型態辨識引擎 (v9.0) ---
-def detect_kline_pattern(df):
-    if len(df) < 3: return "資料不足", 0
-    t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]
-    def get_body(row): return abs(row['Close'] - row['Open'])
-    def get_upper(row): return row['High'] - max(row['Close'], row['Open'])
-    def get_lower(row): return min(row['Close'], row['Open']) - row['Low']
-    def is_bull(row): return row['Close'] > row['Open']
-    def is_bear(row): return row['Close'] < row['Open']
-    body0 = get_body(t0)
-    avg_body = np.mean([get_body(df.iloc[-i]) for i in range(1, 6)])
-
-    if is_bull(t0) and is_bear(t1) and t0['Close'] > t1['Open'] and t0['Open'] < t1['Close']: return "多頭吞噬 📈", 1
-    if is_bear(t0) and is_bull(t1) and t0['Close'] < t1['Open'] and t0['Open'] > t1['Close']: return "空頭吞噬 📉", -1
-    if get_lower(t0) > 2 * body0 and get_upper(t0) < body0 * 0.5: return "錘頭 🔨", 0.5 
-    if get_upper(t0) > 2 * body0 and get_lower(t0) < body0 * 0.5: return "流星 ☄️", -0.5
-    if is_bull(t0) and is_bull(t1) and is_bull(t2) and t0['Close']>t1['Close']>t2['Close']: return "紅三兵 💂‍♂️", 0.8
-    if is_bear(t0) and is_bear(t1) and is_bear(t2) and t0['Close']<t1['Close']<t2['Close']: return "黑三兵 🐻", -0.8
-    if body0 < avg_body * 0.1: return "十字星 ➕", 0
-    if is_bull(t0) and body0 > avg_body * 2: return "長紅K 🟥", 0.6
-    if is_bear(t0) and body0 > avg_body * 2: return "長黑K ⬛", -0.6
-    return "一般整理", 0
-
-# --- 市場價值評估 ---
-def get_valuation_status(current_price, ma60, info_data):
-    pe = info_data.get('pe', 'N/A')
-    bias = (current_price - ma60) / ma60 * 100
-    tech_val = "合理"
-    if bias > 20: tech_val = "過熱"
-    elif bias < -15: tech_val = "超跌"
-    elif bias > 10: tech_val = "略貴"
-    elif bias < -5: tech_val = "略低"
-    fund_val = ""
-    if pe != 'N/A':
-        try:
-            pe_val = float(pe)
-            if pe_val < 10: fund_val = " | PE低估"
-            elif pe_val > 40: fund_val = " | PE高估"
-            elif pe_val < 15: fund_val = " | PE合理"
-        except: pass
-    return f"{tech_val}{fund_val}"
 
 # --- 6. 系統自適應核心 ---
 def detect_market_state(index_df):
@@ -330,6 +287,7 @@ def detect_market_state(index_df):
     atr_pct = (atr / last['Close']) if last['Close'] > 0 else 0
     ma20 = index_df['Close'].rolling(20).mean().iloc[-1]
     ma60 = index_df['Close'].rolling(60).mean().iloc[-1]
+    
     if ma20 > ma60 and adx > 25: return 'TREND'
     elif atr_pct < 0.012: return 'RANGE'
     else: return 'VOLATILE'
@@ -401,15 +359,16 @@ def check_entry_gate(df, rsi, ma20):
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
 
-# --- 7. 繪圖引擎 (v14.0 穩定架構版) ---
+# --- 7. 繪圖引擎 (v14.1 穩定架構版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file = None
     
-    # 鎖定
     with plot_lock:
         try:
-            logger.info(f"🎨 開始處理: {stock_code}")
+            # 清理
+            plt.close('all')
+            plt.clf()
             
             raw_code = stock_code.upper().strip()
             if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
@@ -433,7 +392,6 @@ def create_stock_chart(stock_code):
 
             if df.empty: return None, "找不到代號或系統繁忙。"
             
-            # 計算數據 (輕量化)
             stock_name = get_stock_name(target)
             info_data = get_stock_info_cached(target)
             eps = info_data['eps']
@@ -460,8 +418,8 @@ def create_stock_chart(stock_code):
             delta = df['Close'].diff()
             gain = (delta.where(delta>0, 0)).rolling(14).mean()
             loss = (-delta.where(delta<0, 0)).rolling(14).mean()
-            rs_idx = gain / loss
-            df['RSI'] = 100 - (100/(1+rs_idx))
+            rs_idx = gain/loss
+            df['RSI'] = 100-(100/(1+rs_idx))
             
             df['Vol_MA20'] = df['Volume'].rolling(20).mean()
             df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
@@ -470,7 +428,6 @@ def create_stock_chart(stock_code):
             df['ATR'] = calculate_atr(df)
             df['OBV'] = calculate_obv(df)
 
-            # 準備數據
             last = df.iloc[-1]
             price = last['Close']
             ma20, ma60 = last['MA20'], last['MA60']
@@ -546,7 +503,6 @@ def create_stock_chart(stock_code):
 
             # ★ 繪圖嘗試 (Fail-safe)
             try:
-                logger.info("🎨 正在畫圖...")
                 fig = Figure(figsize=(10, 8)) # 縮小尺寸
                 canvas = FigureCanvas(fig)
                 
@@ -577,7 +533,6 @@ def create_stock_chart(stock_code):
                 result_file = filename
                 
                 del fig; del canvas
-                logger.info("✅ 畫圖成功")
 
             except Exception as plot_err:
                 logger.error(f"❌ 畫圖失敗 (降級回報): {plot_err}")
@@ -590,11 +545,14 @@ def create_stock_chart(stock_code):
 
     return result_file, analysis_report
 
-# --- 8. 選股功能 (同前) ---
+# --- 8. 選股功能 (v14.1 緊急修復版) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
-        for s in SECTOR_DICT.values(): for x in s: all_s.add(x)
+        # ★ 修正：巢狀迴圈標準寫法
+        for s in SECTOR_DICT.values():
+            for x in s:
+                all_s.add(x)
         watch_list = random.sample(list(all_s), min(30, len(all_s)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
@@ -797,7 +755,7 @@ def handle_message(event):
         t = f"🎲 {p}\n(Score評分制)\n====================\n" + "\n\n".join(r) if r else "運氣不好，沒找到強勢股。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=t))
     else:
-        # ★ v14.0 繪圖防崩潰核心邏輯
+        # 個股診斷
         img, txt = create_stock_chart(msg)
         if img:
             url = request.host_url.replace("http://", "https://") + 'images/' + img
@@ -806,7 +764,6 @@ def handle_message(event):
                 TextSendMessage(text=txt)
             ])
         else:
-            # 畫圖失敗，但至少回傳文字報告
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=txt))
 
 if __name__ == "__main__":
