@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v13.0 鐵血教官版 (情緒熔斷+強制封鎖)"
+APP_VERSION = "v13.1 最終修復版 (修正隨機推薦語法錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -72,18 +72,14 @@ except:
 EPS_CACHE = {}
 INFO_CACHE = {}
 
-# ★ v13.0 新增：使用者行為追蹤 (User State Machine)
-# 結構: { 'user_id': { 'last_time': datetime, 'count': int, 'cooldown_until': datetime } }
+# 使用者行為追蹤 (情緒熔斷)
 USER_USAGE = {}
-MAX_REQUESTS_PER_WINDOW = 5  # 5分鐘內最多查5次 (防止過度交易)
+MAX_REQUESTS_PER_WINDOW = 5  # 5分鐘內最多查5次
 WINDOW_SECONDS = 300         # 視窗 5 分鐘
 COOLDOWN_SECONDS = 600       # 鎖定 10 分鐘
 
 def check_user_state(user_id):
-    """
-    檢查使用者是否情緒失控 (Over-trading)
-    回傳: (is_blocked, message)
-    """
+    """檢查使用者是否情緒失控"""
     now = datetime.now()
     
     if user_id not in USER_USAGE:
@@ -101,7 +97,6 @@ def check_user_state(user_id):
     if (now - user_data['last_time']).total_seconds() < WINDOW_SECONDS:
         user_data['count'] += 1
     else:
-        # 超過視窗時間，重置計數
         user_data['count'] = 1
         user_data['last_time'] = now
     
@@ -255,6 +250,8 @@ def calculate_adx(df, window=14):
         atr = tr.rolling(window).mean()
         plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
+        
+        # 數學修復：使用 1e-9 避免除以零
         sum_di = abs(plus_di + minus_di) + 1e-9
         dx = (abs(plus_di - minus_di) / sum_di) * 100
         adx = dx.rolling(window).mean()
@@ -294,6 +291,7 @@ def detect_kline_pattern(df):
     body0 = get_body(t0)
     avg_body = np.mean([get_body(df.iloc[-i]) for i in range(1, 6)])
 
+    # 語意降溫
     if is_bull(t0) and is_bear(t1) and t0['Close'] > t1['Open'] and t0['Open'] < t1['Close']:
         return "多頭吞噬 (偏多型態) 📈", 1
     if is_bear(t0) and is_bull(t1) and t0['Close'] < t1['Open'] and t0['Open'] > t1['Close']:
@@ -349,7 +347,7 @@ def detect_market_state(index_df):
     elif atr_pct < 0.012: return 'RANGE'
     else: return 'VOLATILE'
 
-# ★ v9.0+v13.0 教練提示 (含額度限制)
+# ★ v13.0 教練提示 (含額度限制)
 def get_market_commentary(state):
     if state == 'TREND':
         return "🟢 今日盤勢：適合新手 (順勢操作)\n👉 策略：只做多頭排列股，不摸頭。\n🛑 額度：建議最多 2 檔。"
@@ -429,25 +427,17 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# ★ v11.0 Entry Gate (入場門檻檢查 - v13.0 嚴格版)
+# ★ v11.0 Entry Gate (入場門檻檢查)
 def check_entry_gate(df, rsi, ma20):
-    """
-    檢查是否符合進場條件
-    """
     current_price = df['Close'].iloc[-1]
-    
-    # 1. 乖離率過大 (正乖離 > 12%) -> 等回測
     bias = (current_price - ma20) / ma20 * 100
     if bias > 12:
         return "WAIT", "乖離過大 (>12%)，建議等待回測 MA20"
-    
-    # 2. RSI 過熱 (RSI > 85) -> 禁止追高
     if rsi > 85:
         return "BAN", "指標極度過熱 (RSI>85)，禁止追價"
-        
     return "PASS", "符合進場規範"
 
-# --- 7. 繪圖引擎 (v13.0) ---
+# --- 7. 繪圖引擎 (v13.1 修復版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file, result_text = None, ""
@@ -645,11 +635,14 @@ def create_stock_chart(stock_code):
 
     return result_file, result_text
 
-# --- 8. 選股功能 (v13.0 鐵血教官版) ---
+# --- 8. 選股功能 (v13.1 語法修復版) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
-        for s in SECTOR_DICT.values(): for x in s: all_s.add(x)
+        # ★ 修正：巢狀迴圈標準寫法
+        for s in SECTOR_DICT.values():
+            for x in s:
+                all_s.add(x)
         watch_list = random.sample(list(all_s), min(30, len(all_s)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
@@ -673,7 +666,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             market_commentary = get_market_commentary(mkt)
             stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
             
-            # ★ v12.0 熔斷機制：如果是 VOLATILE (空頭/劇烈波動)，直接回傳空清單並警告
+            # ★ 熔斷機制
             if mkt == 'VOLATILE':
                 return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
 
@@ -686,7 +679,6 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
         for stock in watch_list:
             try:
-                # ... (省略資料處理，與之前相同) ...
                 if isinstance(data.columns, pd.MultiIndex):
                     try:
                         c = data['Close'][stock]; v = data['Volume'][stock]
@@ -715,7 +707,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 tr = (h-l).rolling(14).mean().iloc[-1]
                 atr = tr if tr > 0 else price*0.02
                 
-                # 計算 RSI 供 Entry Gate 使用
+                # RSI 
                 delta = c.diff()
                 gain = (delta.where(delta>0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta<0, 0)).rolling(14).mean()
@@ -730,7 +722,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                     candidates.append({
                         'stock': stock, 'price': price, 'ma20': curr_ma20, 'ma60': curr_ma60,
                         'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0,
-                        'rsi': curr_rsi # 加入 RSI
+                        'rsi': curr_rsi
                     })
             except: continue
 
@@ -772,7 +764,6 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 )
                 recommendations.append(info)
             
-            # 加上盤勢教練與風險提醒
             title_prefix = f"{market_commentary}\n\n{title_prefix}"
             recommendations.append(f"\n{get_psychology_reminder()}")
 
@@ -802,13 +793,13 @@ def serve_image(filename): return send_from_directory(static_dir, filename)
 def handle_message(event):
     msg = event.message.text.strip()
     if not msg: return
-    user_id = event.source.user_id # 取得使用者 ID
+    user_id = event.source.user_id 
 
     # ★ v13.0 檢查使用者狀態 (情緒熔斷)
     is_blocked, block_msg = check_user_state(user_id)
     if is_blocked:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=block_msg))
-        return # 強制結束，不處理後續
+        return 
 
     if msg in ["說明", "教學", "名詞解釋", "新手", "看不懂"]:
         txt = (
