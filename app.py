@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v13.1 最終修復版 (修正隨機推薦語法錯誤)"
+APP_VERSION = "v13.2 繪圖修復版 (移除殘留 plt 指令)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -250,8 +250,6 @@ def calculate_adx(df, window=14):
         atr = tr.rolling(window).mean()
         plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
-        
-        # 數學修復：使用 1e-9 避免除以零
         sum_di = abs(plus_di + minus_di) + 1e-9
         dx = (abs(plus_di - minus_di) / sum_di) * 100
         adx = dx.rolling(window).mean()
@@ -278,7 +276,7 @@ def fetch_data_with_retry(ticker, period="1y", retries=3, delay=1):
         except Exception: time.sleep(delay * (i + 1))
     return pd.DataFrame()
 
-# --- ★ K線型態辨識引擎 (v9.0 降溫版) ---
+# --- ★ K線型態辨識引擎 ---
 def detect_kline_pattern(df):
     if len(df) < 3: return "資料不足", 0
     t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]
@@ -291,7 +289,6 @@ def detect_kline_pattern(df):
     body0 = get_body(t0)
     avg_body = np.mean([get_body(df.iloc[-i]) for i in range(1, 6)])
 
-    # 語意降溫
     if is_bull(t0) and is_bear(t1) and t0['Close'] > t1['Open'] and t0['Open'] < t1['Close']:
         return "多頭吞噬 (偏多型態) 📈", 1
     if is_bear(t0) and is_bull(t1) and t0['Close'] < t1['Open'] and t0['Open'] > t1['Close']:
@@ -437,14 +434,16 @@ def check_entry_gate(df, rsi, ma20):
         return "BAN", "指標極度過熱 (RSI>85)，禁止追價"
     return "PASS", "符合進場規範"
 
-# --- 7. 繪圖引擎 (v13.1 修復版) ---
+# --- 7. 繪圖引擎 (v13.2 修復版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file, result_text = None, ""
     
     with plot_lock:
         try:
-            plt.close('all'); plt.clf()
+            # 移除所有殘留的 plt 指令
+            # plt.close('all') # Removed
+            # plt.clf() # Removed
             
             raw_code = stock_code.upper().strip()
             if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
@@ -764,6 +763,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 )
                 recommendations.append(info)
             
+            # 加上盤勢教練與風險提醒
             title_prefix = f"{market_commentary}\n\n{title_prefix}"
             recommendations.append(f"\n{get_psychology_reminder()}")
 
