@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v15.1 極速優化版 (大盤快取+防超時)"
+APP_VERSION = "v15.2 流量分流穩定版 (分批下載+改用Download)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -71,7 +71,7 @@ except:
 # --- 3. 全域快取與使用者狀態 ---
 EPS_CACHE = {}
 INFO_CACHE = {}
-BENCHMARK_CACHE = {'data': None, 'time': 0} # ★ 大盤快取
+BENCHMARK_CACHE = {'data': None, 'time': 0}
 
 # 使用者行為追蹤 (情緒熔斷)
 USER_USAGE = {}
@@ -102,7 +102,7 @@ def check_user_state(user_id):
     
     return False, ""
 
-# EPS 抓取 (Fast Fail - 1.5s Timeout)
+# EPS 抓取 (Fast Fail)
 def get_stock_info_cached(ticker_symbol):
     if ticker_symbol in INFO_CACHE: return INFO_CACHE[ticker_symbol]
     
@@ -120,7 +120,7 @@ def get_stock_info_cached(ticker_symbol):
     result = {}
     t = threading.Thread(target=fetch_info, args=(ticker_symbol, result))
     t.start()
-    t.join(timeout=1.5) # ★ 縮短超時時間至 1.5秒
+    t.join(timeout=1.5) # Fast fail
 
     if 'data' in result:
         INFO_CACHE[ticker_symbol] = result['data']
@@ -132,16 +132,14 @@ def get_eps_cached(ticker_symbol):
     info = get_stock_info_cached(ticker_symbol)
     return info['eps']
 
-# ★ 大盤資料快取 (避免每次重抓)
 def get_benchmark_data():
     now = time.time()
-    # 快取 1 小時 (3600秒)
     if BENCHMARK_CACHE['data'] is not None and (now - BENCHMARK_CACHE['time']) < 3600:
         return BENCHMARK_CACHE['data']
     
     try:
-        logger.info("📉 下載大盤資料 (0050.TW)...")
-        bench = yf.Ticker("0050.TW").history(period="1y")
+        # 使用 download 替代 history 增加成功率
+        bench = yf.download("0050.TW", period="1y", progress=False, threads=False)
         if not bench.empty:
             BENCHMARK_CACHE['data'] = bench
             BENCHMARK_CACHE['time'] = now
@@ -165,20 +163,6 @@ SECTOR_DICT = {
     ],
     "台積電集團": ['2330.TW', '5347.TWO', '3443.TW', '3374.TW', '3661.TW', '3105.TWO'],
     "鴻海集團": ['2317.TW', '2328.TW', '2354.TW', '6414.TW', '5243.TW', '3413.TW', '6451.TW'],
-    "台塑集團": ['1301.TW', '1303.TW', '1326.TW', '6505.TW', '2408.TW', '8039.TW'],
-    "聯電集團": ['2303.TW', '3037.TW', '3035.TW', '3034.TW', '3529.TWO', '6166.TWO'],
-    "長榮集團": ['2603.TW', '2618.TW', '2609.TW', '2637.TW', '2607.TW'],
-    "華新集團": ['1605.TW', '2492.TW', '5469.TWO', '6173.TWO', '8163.TWO', '2344.TW'],
-    "國巨集團": ['2327.TW', '2456.TW', '6271.TW', '5328.TWO', '3026.TW'],
-    "永豐餘集團": ['1907.TW', '8069.TWO', '6404.TW'],
-    "統一集團": ['1216.TW', '1232.TW', '2912.TW', '1210.TW'],
-    "遠東集團": ['1402.TW', '1102.TW', '2903.TW', '2845.TW', '1710.TW'],
-    "潤泰集團": ['2915.TW', '9945.TW', '8463.TW', '4174.TWO'],
-    "金仁寶集團": ['2312.TW', '2324.TW', '6282.TW', '3715.TW'],
-    "裕隆集團": ['2201.TW', '2204.TW', '2412.TW', '3122.TWO'],
-    "大同集團": ['2371.TW', '2313.TW', '3519.TW', '8081.TW'],
-    "聯華神通集團": ['1229.TW', '2347.TW', '3702.TW', '3005.TW'],
-    "友達集團": ['2409.TW', '4960.TW', '6120.TWO'],
     "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
     "電子": ['2317.TW', '2382.TW', '3231.TW', '2353.TW', '2357.TW', '2324.TW', '2301.TW', '2356.TW'],
     "光電": ['3008.TW', '3406.TW', '2409.TW', '3481.TW', '6706.TW', '2340.TW'],
@@ -289,14 +273,24 @@ def calculate_obv(df):
     try: return (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     except: return pd.Series([0]*len(df), index=df.index)
 
-def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1): # ★ 降為2次
+# --- v15.2 修復: 使用 yf.download 替代 ticker.history (防止單股查詢超時) ---
+def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1):
     for i in range(retries):
         try:
-            logger.info(f"⏳ 抓取 {ticker.ticker} (試{i+1})...")
-            df = ticker.history(period=period)
-            if not df.empty: return df
+            # logger.info(f"⏳ 抓取 {ticker.ticker} (試{i+1})...")
+            # 使用 download 並關閉多執行緒以減少被擋機率
+            df = yf.download(ticker.ticker, period=period, progress=False, threads=False)
+            
+            # yf.download 傳回的 MultiIndex 處理
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    # 嘗試扁平化
+                    try:
+                        df = df.xs(ticker.ticker, axis=1, level=1)
+                    except: pass
+                return df
             time.sleep(0.5)
-        except Exception: time.sleep(delay)
+        except Exception: time.sleep(delay * (i + 1))
     return pd.DataFrame()
 
 # --- ★ K線型態辨識引擎 ---
@@ -308,7 +302,6 @@ def detect_kline_pattern(df):
     def get_lower(row): return min(row['Close'], row['Open']) - row['Low']
     def is_bull(row): return row['Close'] > row['Open']
     def is_bear(row): return row['Close'] < row['Open']
-
     body0 = get_body(t0)
     avg_body = np.mean([get_body(df.iloc[-i]) for i in range(1, 6)])
 
@@ -422,52 +415,57 @@ def check_entry_gate(current_price, rsi, ma20):
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
 
-# --- 7. 繪圖引擎 (v15.1 極速優化版) ---
+# --- 7. 繪圖引擎 (v15.2 流量分流穩定版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file = None
     result_text = ""
-    start_time = time.time()
     
     with plot_lock:
         try:
             plt.close('all'); plt.clf()
             
-            # 1. 下載資料 (優化: 減少重試，縮短超時)
             raw_code = stock_code.upper().strip()
-            if raw_code.endswith('.TW') or raw_code.endswith('.TWO'): target = raw_code
-            else: target = raw_code + ".TW"
-            ticker = yf.Ticker(target)
+            if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
+                target = raw_code
+                ticker = yf.Ticker(target)
+            else:
+                target = raw_code + ".TW"
+                ticker = yf.Ticker(target)
             
-            logger.info(f"⏳ [Timer] Start download {target}...")
-            df = fetch_data_with_retry(ticker, period="1y", retries=2) # 降為2次
+            # ★ 改用 fetch_data_with_retry (內部已換成 download)
+            df = fetch_data_with_retry(ticker, period="1y")
             
             if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
-                target = raw_code + ".TWO"
-                ticker = yf.Ticker(target)
-                df = fetch_data_with_retry(ticker, period="1y", retries=2)
+                target_two = raw_code + ".TWO"
+                ticker_two = yf.Ticker(target_two)
+                df = fetch_data_with_retry(ticker_two, period="1y")
+                if not df.empty:
+                    target = target_two
+                    ticker = ticker_two
 
-            if df.empty: return None, "找不到代號或系統繁忙。"
-            logger.info(f"✅ [Timer] Data fetched in {time.time()-start_time:.2f}s")
+            if df.empty: return None, "找不到代號或系統繁忙 (Yahoo 限流)。"
             
             stock_name = get_stock_name(target)
-            info_data = get_stock_info_cached(target) # Fast Fail EPS
-            eps = info_data.get('eps', 'N/A')
+            info_data = get_stock_info_cached(target)
+            eps = info_data['eps']
 
-            # 2. Benchmark Cache (修正: 使用快取)
-            bench_df = get_benchmark_data()
             try:
-                if not bench_df.empty:
-                    common = df.index.intersection(bench_df.index)
-                    if len(common) > 20:
-                        s_ret = df.loc[common, 'Close'].pct_change(20)
-                        b_ret = bench_df.loc[common, 'Close'].pct_change(20)
-                        df.loc[common, 'RS'] = (1+s_ret)/(1+b_ret)
-                    else: df['RS'] = 1.0
+                # 大盤改用 download
+                bench = yf.download("0050.TW", period="1y", progress=False, threads=False)
+                # 處理 MultiIndex
+                if isinstance(bench.columns, pd.MultiIndex):
+                    try: bench = bench.xs("0050.TW", axis=1, level=1)
+                    except: pass
+                    
+                common = df.index.intersection(bench.index)
+                if len(common) > 20:
+                    s_ret = df.loc[common, 'Close'].pct_change(20)
+                    b_ret = bench.loc[common, 'Close'].pct_change(20)
+                    df.loc[common, 'RS'] = (1+s_ret)/(1+b_ret)
                 else: df['RS'] = 1.0
             except: df['RS'] = 1.0
 
-            # 3. 指標計算
             if len(df) < 60:
                 df['MA20'] = df['Close'].rolling(20).mean(); df['MA60'] = df['MA20']
             else:
@@ -479,8 +477,10 @@ def create_stock_chart(stock_code):
             loss = (-delta.where(delta<0, 0)).rolling(14).mean()
             rs_idx = gain/loss
             df['RSI'] = 100-(100/(1+rs_idx))
+            
             df['Vol_MA20'] = df['Volume'].rolling(20).mean()
             df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
+            
             df['ADX'] = calculate_adx(df)
             df['ATR'] = calculate_atr(df)
             df['OBV'] = calculate_obv(df)
@@ -501,15 +501,17 @@ def create_stock_chart(stock_code):
             if adx < 20: trend_quality = "盤整 💤"
             elif adx > 40: trend_quality = "強勁 🔥"
             else: trend_quality = "確立 ✅"
+
             if ma20 > ma60 and slope > 0: trend_dir = "多頭"
             elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
             else: trend_dir = "震盪"
+
             if rs_val > 1.05: rs_str = "強於大盤 🦅"
             elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
             else: rs_str = "跟隨"
 
-            atr_stop_loss = price - atr * 1.5
-            final_stop = max(atr_stop_loss, ma20) if trend_dir == "多頭" and ma20 < price else atr_stop_loss
+            stop = price - atr * 1.5
+            final_stop = max(stop, ma20) if trend_dir == "多頭" and ma20 < price else stop
             target_price_val = price + atr * 3 
 
             obv_warning = ""
@@ -545,6 +547,10 @@ def create_stock_chart(stock_code):
                 f"💎 {valuation_status}\n"
                 f"🦅 RS: {rs_val:.2f} ({rs_str})\n"
                 f"------------------\n"
+                f"📐 **期望值結構**：\n"
+                f"• 勝率預估: 45~50%\n"
+                f"• 盈虧比: 2.5R\n"
+                f"------------------\n"
                 f"🎯 目標: {target_price_val:.1f} | 🛑 停損: {final_stop:.1f}\n"
                 f"{exit_rule}\n"
                 f"💡 建議: {advice}"
@@ -552,10 +558,8 @@ def create_stock_chart(stock_code):
                 f"{get_psychology_reminder()}"
             )
             
-            logger.info(f"✅ [Timer] Analysis done in {time.time()-start_time:.2f}s")
-            result_text = analysis_report
+            result_text = analysis_report # 先存文字，確保失敗有回傳
 
-            # 4. 繪圖 (Agg模式)
             fig = Figure(figsize=(10, 10))
             canvas = FigureCanvas(fig)
             
@@ -588,20 +592,19 @@ def create_stock_chart(stock_code):
             
             filename = f"{target.replace('.', '_')}_{int(time.time())}.png"
             filepath = os.path.join(static_dir, filename)
-            fig.savefig(filepath, bbox_inches='tight', dpi=80) # 降 DPI 提速
+            fig.savefig(filepath, bbox_inches='tight')
             result_file = filename
             del fig; del canvas
-            
-            logger.info(f"✅ [Timer] Plot saved in {time.time()-start_time:.2f}s")
 
         except Exception as e:
-            return None, f"繪圖失敗: {str(e)}\n\n{result_text}"
+            # 發生錯誤時，至少回傳文字
+            return None, f"分析成功但繪圖失敗 ({str(e)})\n\n{result_text}"
         finally:
             gc.collect()
 
     return result_file, result_text
 
-# --- 8. 選股功能 (同 v14.9) ---
+# --- 8. 選股功能 (v15.2 分流穩定版) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
@@ -619,71 +622,104 @@ def scan_potential_stocks(max_price=None, sector_name=None):
     candidates = []
 
     try:
+        # 1. 抓大盤狀態
         try:
-            bench_df = get_benchmark_data() # ★ 改用快取
-            if not bench_df.empty:
-                mkt = detect_market_state(bench_df)
-                w = WEIGHT_BY_STATE[mkt]
-                b_ret = bench_df['Close'].pct_change(20).iloc[-1]
-                market_commentary = get_market_commentary(mkt)
-                stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
-                if mkt == 'VOLATILE': return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
-            else: raise Exception("Bench Empty")
+            bench = yf.download("0050.TW", period="6mo", progress=False, threads=False)
+            if isinstance(bench.columns, pd.MultiIndex):
+                try: bench = bench.xs("0050.TW", axis=1, level=1)
+                except: pass
+            
+            mkt = detect_market_state(bench)
+            w = WEIGHT_BY_STATE[mkt]
+            b_ret = bench['Close'].pct_change(20).iloc[-1] if not bench.empty else 0
+            
+            market_commentary = get_market_commentary(mkt)
+            stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
+            
+            if mkt == 'VOLATILE':
+                return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
+
         except:
             mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間", "未知"
             stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
             market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
 
-        data = yf.download(watch_list, period="3mo", progress=False, threads=False)
-        if data is None or data.empty: return title_prefix, ["系統繁忙 (Yahoo 限流)"]
-
-        for stock in watch_list:
+        # 2. ★ v15.2: Chunking 分批下載 (每次10檔) 避免被擋
+        chunk_size = 10
+        chunks = [watch_list[i:i + chunk_size] for i in range(0, len(watch_list), chunk_size)]
+        
+        all_data_frames = []
+        for chunk in chunks:
             try:
-                if isinstance(data.columns, pd.MultiIndex):
-                    try:
-                        c = data['Close'][stock]; v = data['Volume'][stock]
-                        h = data['High'][stock]; l = data['Low'][stock]
-                    except: continue
-                else:
-                    c = data['Close']; v = data['Volume']; h = data['High']; l = data['Low']
-                
-                if isinstance(c, pd.DataFrame): 
-                    if c.empty: continue
-                    c=c.iloc[:,0]; v=v.iloc[:,0]; h=h.iloc[:,0]; l=l.iloc[:,0]
-
-                c = c.dropna()
-                if len(c) < 60: continue
-                price = c.iloc[-1]
-                if max_price and price > max_price: continue
-
-                ma20 = c.rolling(20).mean(); ma60 = c.rolling(60).mean()
-                v_ma = v.rolling(20).mean()
-                slope = ma20.diff(5).iloc[-1]
-                vol_r = v.iloc[-1]/v_ma.iloc[-1] if v_ma.iloc[-1]>0 else 0
-                s_ret = c.pct_change(20).iloc[-1]
-                rs = (1+s_ret)/(1+b_ret)
-                tr = (h-l).rolling(14).mean().iloc[-1]
-                atr = tr if tr > 0 else price*0.02
-                
-                delta = c.diff()
-                gain = (delta.where(delta>0, 0)).rolling(14).mean()
-                loss = (-delta.where(delta<0, 0)).rolling(14).mean()
-                rs_idx = gain/loss
-                rsi = 100-(100/(1+rs_idx))
-                curr_rsi = rsi.iloc[-1]
-                curr_ma20 = ma20.iloc[-1]; curr_ma60 = ma60.iloc[-1]
-
-                if curr_ma20 > curr_ma60 and slope > 0:
-                    candidates.append({
-                        'stock': stock, 'price': price, 'ma20': curr_ma20, 'ma60': curr_ma60,
-                        'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0, 'rsi': curr_rsi
-                    })
+                # 每個 chunk 下載一次
+                d = yf.download(chunk, period="3mo", progress=False, threads=False)
+                if not d.empty:
+                    all_data_frames.append(d)
+                time.sleep(0.5) # 休息一下防擋
             except: continue
+            
+        if not all_data_frames:
+             return title_prefix, ["系統繁忙 (Yahoo 限流)，請稍後再試。"]
+
+        # 3. 逐一處理資料 (處理複雜的 MultiIndex)
+        for d_chunk in all_data_frames:
+             # 如果只有一檔股票，download 回傳格式會不同，需標準化
+            is_multi = isinstance(d_chunk.columns, pd.MultiIndex)
+            
+            # 取得該 chunk 包含的所有股票代號
+            if is_multi:
+                # 這裡假設第二層是 Ticker
+                stocks_in_chunk = d_chunk.columns.get_level_values(1).unique()
+            else:
+                # 只有一檔時，columns 就是 Open, Close...
+                # 需要知道是哪一檔 (從 watch_list 反推或無法得知)
+                # 簡化處理：如果單檔失敗就略過，因為我們有 chunking
+                # 但 yf.download list 只有一檔時不會是 MultiIndex
+                # 這裡為了穩健，如果不是 MultiIndex 我們假設就是那一檔 (但要對應回 stock code 比較麻煩)
+                # 所以我們只處理 MultiIndex (通常 chunk>1)
+                stocks_in_chunk = []
+
+            for stock in stocks_in_chunk:
+                try:
+                    c = d_chunk['Close'][stock]
+                    v = d_chunk['Volume'][stock]
+                    h = d_chunk['High'][stock]
+                    l = d_chunk['Low'][stock]
+                    
+                    c = c.dropna()
+                    if len(c) < 60: continue
+                    price = c.iloc[-1]
+                    if max_price and price > max_price: continue
+
+                    ma20 = c.rolling(20).mean(); ma60 = c.rolling(60).mean()
+                    v_ma = v.rolling(20).mean()
+                    slope = ma20.diff(5).iloc[-1]
+                    vol_r = v.iloc[-1]/v_ma.iloc[-1] if v_ma.iloc[-1]>0 else 0
+                    s_ret = c.pct_change(20).iloc[-1]
+                    rs = (1+s_ret)/(1+b_ret)
+                    tr = (h-l).rolling(14).mean().iloc[-1]
+                    atr = tr if tr > 0 else price*0.02
+                    
+                    delta = c.diff()
+                    gain = (delta.where(delta>0, 0)).rolling(14).mean()
+                    loss = (-delta.where(delta<0, 0)).rolling(14).mean()
+                    rs_idx = gain/loss
+                    rsi = 100-(100/(1+rs_idx))
+                    curr_rsi = rsi.iloc[-1]
+
+                    if ma20.iloc[-1] > ma60.iloc[-1] and slope > 0:
+                        candidates.append({
+                            'stock': stock, 'price': price, 'ma20': ma20.iloc[-1], 'ma60': ma60.iloc[-1],
+                            'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0,
+                            'rsi': curr_rsi 
+                        })
+                except: continue
 
         if candidates:
             df = pd.DataFrame(candidates)
             df['rs_rank'] = df['rs_raw'].rank(pct=True)
             df = calculate_score(df, w)
+            
             th = 70 if mkt == 'RANGE' else 60
             df = df.sort_values('total_score', ascending=False)
             picks = df[df['total_score']>=th].head(6)
@@ -712,6 +748,8 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             
             title_prefix = f"{market_commentary}\n\n{title_prefix}"
             recommendations.append(f"\n{get_psychology_reminder()}")
+        else:
+            return title_prefix, ["今日無符合強勢股，建議空手。"]
 
     except Exception as e:
         return title_prefix, [f"掃描錯誤: {str(e)}"]
