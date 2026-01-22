@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v15.2 流量分流穩定版 (分批下載+改用Download)"
+APP_VERSION = "v15.3 最終穩定修正版 (修復語法與繪圖崩潰)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -293,7 +293,7 @@ def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1):
         except Exception: time.sleep(delay * (i + 1))
     return pd.DataFrame()
 
-# --- ★ K線型態辨識引擎 ---
+# --- ★ K線型態辨識引擎 (v9.0 降溫版) ---
 def detect_kline_pattern(df):
     if len(df) < 3: return "資料不足", 0
     t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]
@@ -409,13 +409,14 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
+# ★ v11.0 Entry Gate
 def check_entry_gate(current_price, rsi, ma20):
     bias = (current_price - ma20) / ma20 * 100
     if bias > 12: return "WAIT", "乖離過大"
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
 
-# --- 7. 繪圖引擎 (v15.2 流量分流穩定版) ---
+# --- 7. 繪圖引擎 (v15.3 穩定版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file = None
@@ -423,7 +424,8 @@ def create_stock_chart(stock_code):
     
     with plot_lock:
         try:
-            plt.close('all'); plt.clf()
+            # 移除舊 plt 指令
+            # plt.close('all'); plt.clf()
             
             raw_code = stock_code.upper().strip()
             if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
@@ -436,15 +438,17 @@ def create_stock_chart(stock_code):
             # ★ 改用 fetch_data_with_retry (內部已換成 download)
             df = fetch_data_with_retry(ticker, period="1y")
             
+            # 自動切換上櫃
             if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
                 target_two = raw_code + ".TWO"
                 ticker_two = yf.Ticker(target_two)
-                df = fetch_data_with_retry(ticker_two, period="1y")
-                if not df.empty:
+                df_two = fetch_data_with_retry(ticker_two, period="1y")
+                if not df_two.empty:
                     target = target_two
                     ticker = ticker_two
-
-            if df.empty: return None, "找不到代號或系統繁忙 (Yahoo 限流)。"
+                    df = df_two
+            
+            if df.empty: return None, "找不到代號或系統繁忙。"
             
             stock_name = get_stock_name(target)
             info_data = get_stock_info_cached(target)
@@ -472,6 +476,7 @@ def create_stock_chart(stock_code):
                 df['MA20'] = df['Close'].rolling(20).mean(); df['MA60'] = df['Close'].rolling(60).mean()
             
             df['Slope'] = df['MA20'].diff(5)
+            
             delta = df['Close'].diff()
             gain = (delta.where(delta>0, 0)).rolling(14).mean()
             loss = (-delta.where(delta<0, 0)).rolling(14).mean()
@@ -516,8 +521,9 @@ def create_stock_chart(stock_code):
 
             obv_warning = ""
             try:
-                if len(df) > 10 and df['Close'].iloc[-1] > df['Close'].iloc[-10] and df['OBV'].iloc[-1] < df['OBV'].iloc[-10]:
-                    obv_warning = " (⚠️背離)"
+                if len(df) > 10:
+                    if df['Close'].iloc[-1] > df['Close'].iloc[-10] and df['OBV'].iloc[-1] < df['OBV'].iloc[-10]:
+                        obv_warning = " (⚠️背離)"
             except: pass
 
             entry_status, entry_msg = check_entry_gate(price, rsi, ma20)
@@ -604,11 +610,14 @@ def create_stock_chart(stock_code):
 
     return result_file, result_text
 
-# --- 8. 選股功能 (v15.2 分流穩定版) ---
+# --- 8. 選股功能 (v15.3 修正版) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
-        for s in SECTOR_DICT.values(): for x in s: all_s.add(x)
+        # ★ 修正：巢狀迴圈標準寫法
+        for s in SECTOR_DICT.values():
+            for x in s:
+                all_s.add(x)
         watch_list = random.sample(list(all_s), min(30, len(all_s)))
         title_prefix = "【熱門隨機】"
     elif sector_name and sector_name in SECTOR_DICT:
