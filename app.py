@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v14.8 最終除錯版 (修復 Entry Gate 崩潰)"
+APP_VERSION = "v14.9 最終穩定補強版 (修復變數未定義與空訊息錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -277,15 +277,15 @@ def detect_kline_pattern(df):
     body0 = get_body(t0)
     avg_body = np.mean([get_body(df.iloc[-i]) for i in range(1, 6)])
 
-    if is_bull(t0) and is_bear(t1) and t0['Close'] > t1['Open'] and t0['Open'] < t1['Close']: return "多頭吞噬 (偏多型態) 📈", 1
-    if is_bear(t0) and is_bull(t1) and t0['Close'] < t1['Open'] and t0['Open'] > t1['Close']: return "空頭吞噬 (偏空型態) 📉", -1
-    if get_lower(t0) > 2 * body0 and get_upper(t0) < body0 * 0.5: return "錘頭 (疑似底部) 🔨", 0.5 
-    if get_upper(t0) > 2 * body0 and get_lower(t0) < body0 * 0.5: return "流星 (疑似頂部) ☄️", -0.5
-    if is_bull(t0) and is_bull(t1) and is_bull(t2) and t0['Close']>t1['Close']>t2['Close']: return "紅三兵 (多頭排列) 💂‍♂️", 0.8
-    if is_bear(t0) and is_bear(t1) and is_bear(t2) and t0['Close']<t1['Close']<t2['Close']: return "黑三兵 (空頭排列) 🐻", -0.8
-    if body0 < avg_body * 0.1: return "十字星 (多空觀望) ➕", 0
-    if is_bull(t0) and body0 > avg_body * 2: return "長紅K (量增轉強) 🟥", 0.6
-    if is_bear(t0) and body0 > avg_body * 2: return "長黑K (轉弱) ⬛", -0.6
+    if is_bull(t0) and is_bear(t1) and t0['Close'] > t1['Open'] and t0['Open'] < t1['Close']: return "多頭吞噬 📈", 1
+    if is_bear(t0) and is_bull(t1) and t0['Close'] < t1['Open'] and t0['Open'] > t1['Close']: return "空頭吞噬 📉", -1
+    if get_lower(t0) > 2 * body0 and get_upper(t0) < body0 * 0.5: return "錘頭 🔨", 0.5 
+    if get_upper(t0) > 2 * body0 and get_lower(t0) < body0 * 0.5: return "流星 ☄️", -0.5
+    if is_bull(t0) and is_bull(t1) and is_bull(t2) and t0['Close']>t1['Close']>t2['Close']: return "紅三兵 💂‍♂️", 0.8
+    if is_bear(t0) and is_bear(t1) and is_bear(t2) and t0['Close']<t1['Close']<t2['Close']: return "黑三兵 🐻", -0.8
+    if body0 < avg_body * 0.1: return "十字星 ➕", 0
+    if is_bull(t0) and body0 > avg_body * 2: return "長紅K 🟥", 0.6
+    if is_bear(t0) and body0 > avg_body * 2: return "長黑K ⬛", -0.6
     return "一般整理", 0
 
 # --- 市場價值評估 ---
@@ -358,11 +358,7 @@ def calculate_score(df_cand, weights):
     
     df_cand['score_risk'] = score_risk
     
-    df_cand['total_score'] = (
-        score_trend * weights['trend'] +
-        df_cand['score_momentum'] * weights['momentum'] +
-        score_risk * weights['risk']
-    )
+    df_cand['total_score'] = (score_trend * weights['trend'] + df_cand['score_momentum'] * weights['momentum'] + score_risk * weights['risk'])
 
     is_aplus = (
         (df_cand['rs_rank'] >= 0.85) & (df_cand['ma20'] > df_cand['ma60']) &
@@ -385,20 +381,19 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# ★ v11.0 Entry Gate (入場門檻檢查 - 修正版：只接收數值)
-def check_entry_gate(current_price, rsi, ma20):
-    """
-    檢查是否符合進場條件
-    """
+# ★ v11.0 Entry Gate
+def check_entry_gate(df, rsi, ma20):
+    current_price = df['Close'].iloc[-1]
     bias = (current_price - ma20) / ma20 * 100
     if bias > 12: return "WAIT", "乖離過大"
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
 
-# --- 7. 繪圖引擎 (v14.8 最終除錯版) ---
+# --- 7. 繪圖引擎 (v14.9 最終穩定補強版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file = None
+    result_text = "" # 確保初始化
     
     with plot_lock:
         try:
@@ -423,121 +418,122 @@ def create_stock_chart(stock_code):
                     ticker = ticker_two
                     df = df_two
             
-            if df.empty: return None, "找不到代號或系統繁忙。"
+            if df.empty: return None, "系統繁忙或找不到代號。"
             
             stock_name = get_stock_name(target)
-            info_data = get_stock_info_cached(target)
-            eps = info_data['eps']
-
-            try:
-                bench = yf.Ticker("0050.TW").history(period="1y")
-                common = df.index.intersection(bench.index)
-                if len(common) > 20:
-                    s_ret = df.loc[common, 'Close'].pct_change(20)
-                    b_ret = bench.loc[common, 'Close'].pct_change(20)
-                    df.loc[common, 'RS'] = (1+s_ret)/(1+b_ret)
-                else: df['RS'] = 1.0
-            except: df['RS'] = 1.0
-
-            if len(df) < 60:
-                df['MA20'] = df['Close'].rolling(20).mean()
-                df['MA60'] = df['MA20']
-            else:
-                df['MA20'] = df['Close'].rolling(20).mean()
-                df['MA60'] = df['Close'].rolling(60).mean()
             
-            df['Slope'] = df['MA20'].diff(5)
-            
-            delta = df['Close'].diff()
-            gain = (delta.where(delta>0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta<0, 0)).rolling(14).mean()
-            rs_idx = gain / loss
-            df['RSI'] = 100 - (100/(1+rs_idx))
-            
-            df['Vol_MA20'] = df['Volume'].rolling(20).mean()
-            df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
-            
-            df['ADX'] = calculate_adx(df)
-            df['ATR'] = calculate_atr(df)
-            df['OBV'] = calculate_obv(df)
-
+            # 優先建立分析報告文字，確保畫圖失敗也能回傳
             last = df.iloc[-1]
             price = last['Close']
-            ma20, ma60 = last['MA20'], last['MA60']
-            slope = last['Slope'] if not pd.isna(last['Slope']) else 0
-            rsi = last['RSI'] if not pd.isna(last['RSI']) else 50
-            adx = last['ADX'] if not pd.isna(last['ADX']) else 0
-            atr = last['ATR'] if not pd.isna(last['ATR']) and last['ATR'] > 0 else price*0.02
-            rs_val = last['RS'] if 'RS' in df.columns and not pd.isna(last['RS']) else 1.0
-            vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
-
-            kline_pattern, kline_score = detect_kline_pattern(df)
-            valuation_status = get_valuation_status(price, ma60, info_data)
-
-            if adx < 20: trend_quality = "盤整 (觀望) 💤"
-            elif adx > 40: trend_quality = "強勁 (勿追高) 🔥"
-            else: trend_quality = "趨勢確立 ✅"
-
-            if ma20 > ma60 and slope > 0: trend_dir = "多頭"
-            elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
-            else: trend_dir = "震盪"
-
-            if rs_val > 1.05: rs_str = "強於大盤 🦅"
-            elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
-            else: rs_str = "跟隨大盤"
-
-            atr_stop_loss = price - atr * 1.5
-            final_stop = max(atr_stop_loss, ma20) if trend_dir == "多頭" and ma20 < price else atr_stop_loss
-            target_price_val = price + atr * 3 
-
-            obv_warning = ""
+            
+            # 簡易指標 (Fail-safe)
+            ma20 = df['Close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else price
+            
+            # 完整指標 (Try)
             try:
-                if len(df) > 10:
-                    if df['Close'].iloc[-1] > df['Close'].iloc[-10] and df['OBV'].iloc[-1] < df['OBV'].iloc[-10]:
-                        obv_warning = " (⚠️背離)"
-            except: pass
+                info_data = get_stock_info_cached(target)
+                eps = info_data.get('eps', 'N/A')
+                
+                try:
+                    bench = yf.Ticker("0050.TW").history(period="1y")
+                    common = df.index.intersection(bench.index)
+                    if len(common) > 20:
+                        s_ret = df.loc[common, 'Close'].pct_change(20)
+                        b_ret = bench.loc[common, 'Close'].pct_change(20)
+                        df.loc[common, 'RS'] = (1+s_ret)/(1+b_ret)
+                    else: df['RS'] = 1.0
+                except: df['RS'] = 1.0
 
-            # ★ 修正：Entry Gate 呼叫 (傳遞數值)
-            entry_status, entry_msg = check_entry_gate(price, rsi, ma20)
-            entry_warning = f"\n{entry_msg}" if entry_status != "PASS" else ""
+                if len(df) < 60:
+                    df['MA20'] = df['Close'].rolling(20).mean(); df['MA60'] = df['MA20']
+                else:
+                    df['MA20'] = df['Close'].rolling(20).mean(); df['MA60'] = df['Close'].rolling(60).mean()
+                
+                df['Slope'] = df['MA20'].diff(5)
+                
+                delta = df['Close'].diff()
+                gain = (delta.where(delta>0, 0)).rolling(14).mean()
+                loss = (-delta.where(delta<0, 0)).rolling(14).mean()
+                rs_idx = gain/loss
+                df['RSI'] = 100-(100/(1+rs_idx))
+                
+                df['Vol_MA20'] = df['Volume'].rolling(20).mean()
+                df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
+                
+                df['ADX'] = calculate_adx(df)
+                df['ATR'] = calculate_atr(df)
+                df['OBV'] = calculate_obv(df)
 
-            advice = "觀望"
-            if trend_dir == "多頭":
-                if entry_status == "BAN": advice = "⛔ 禁止進場 (指標過熱/風險過高)"
-                elif entry_status == "WAIT": advice = "⏳ 暫緩進場 (等待回測 MA20)"
-                elif kline_score > 0: advice = f"✅ 買點浮現 ({kline_pattern})"
-                elif adx < 20: advice = "盤整中，多看少做"
-                elif rs_val < 1: advice = "趨勢雖好但弱於大盤，恐補跌"
-                elif vol_ratio > 3: advice = "短線爆量，小心主力出貨" + obv_warning
-                elif 60 <= rsi <= 75: advice = "量價健康，可依 Score 尋找買點"
-                else: advice = "沿月線操作，跌破出場"
-            elif trend_dir == "空頭":
-                advice = "趨勢向下，勿隨意接刀"
-            else:
-                if kline_score > 0.5: advice = "震盪轉強，僅限老手試單"
-                else: advice = "方向不明，建議觀望"
+                last = df.iloc[-1]
+                price = last['Close']
+                ma20, ma60 = last['MA20'], last['MA60']
+                slope = last['Slope'] if not pd.isna(last['Slope']) else 0
+                rsi = last['RSI'] if not pd.isna(last['RSI']) else 50
+                adx = last['ADX'] if not pd.isna(last['ADX']) else 0
+                atr = last['ATR'] if not pd.isna(last['ATR']) and last['ATR'] > 0 else price*0.02
+                rs_val = last['RS'] if 'RS' in df.columns and not pd.isna(last['RS']) else 1.0
+                vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
 
-            exit_rule = f"🛑 **停損鐵律**：跌破 {final_stop:.1f} 市價出場。"
+                kline_pattern, kline_score = detect_kline_pattern(df)
+                valuation_status = get_valuation_status(price, ma60, info_data)
 
-            analysis_report = (
-                f"📊 {stock_name} ({target}) 診斷\n"
-                f"💰 現價: {price:.1f} | EPS: {eps}\n"
-                f"📈 趨勢: {trend_dir} | {trend_quality}\n"
-                f"🕯️ K線: {kline_pattern}\n"
-                f"💎 價值: {valuation_status}\n"
-                f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
-                f"------------------\n"
-                f"📐 **期望值結構**：\n"
-                f"• 勝率預估: 45~50%\n"
-                f"• 盈虧比: 2.5R\n"
-                f"------------------\n"
-                f"🎯 目標: {target_price_val:.1f} | 🛑 停損: {final_stop:.1f}\n"
-                f"{exit_rule}\n"
-                f"💡 建議: {advice}"
-                f"{entry_warning}\n\n"
-                f"{get_psychology_reminder()}"
-            )
+                if adx < 20: trend_quality = "盤整 💤"
+                elif adx > 40: trend_quality = "強勁 🔥"
+                else: trend_quality = "確立 ✅"
 
+                if ma20 > ma60 and slope > 0: trend_dir = "多頭"
+                elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
+                else: trend_dir = "震盪"
+
+                if rs_val > 1.05: rs_str = "強於大盤 🦅"
+                elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
+                else: rs_str = "跟隨"
+
+                stop = price - atr * 1.5
+                final_stop = max(stop, ma20) if trend_dir == "多頭" and ma20 < price else stop
+                target_price = price + atr * 3 
+
+                entry_status, entry_msg = check_entry_gate(df, rsi, ma20)
+                entry_warning = f"\n{entry_msg}" if entry_status != "PASS" else ""
+
+                advice = "觀望"
+                if trend_dir == "多頭":
+                    if entry_status == "BAN": advice = "⛔ 禁止 (過熱/風險高)"
+                    elif entry_status == "WAIT": advice = "⏳ 暫緩 (等回測MA20)"
+                    elif kline_score > 0: advice = f"✅ 買點浮現 ({kline_pattern})"
+                    elif adx < 20: advice = "盤整中，多看少做"
+                    elif rs_val < 1: advice = "弱於大盤，恐補跌"
+                    elif 60 <= rsi <= 75: advice = "量價健康，可尋買點"
+                    else: advice = "沿月線操作"
+                elif trend_dir == "空頭": advice = "趨勢向下，勿接刀"
+                else:
+                    if kline_score > 0.5: advice = "震盪轉強，老手試單"
+                    else: advice = "方向不明，觀望"
+
+                exit_rule = f"🛑 **停損鐵律**：跌破 {final_stop:.1f} 市價出場。"
+
+                result_text = (
+                    f"📊 {stock_name} ({target}) 診斷\n"
+                    f"💰 {price:.1f} | EPS: {eps}\n"
+                    f"📈 {trend_dir} | {trend_quality}\n"
+                    f"🕯️ {kline_pattern}\n"
+                    f"💎 {valuation_status}\n"
+                    f"🦅 RS: {rs_val:.2f} ({rs_str})\n"
+                    f"------------------\n"
+                    f"📐 **期望值結構**：\n"
+                    f"• 勝率預估: 45~50%\n"
+                    f"• 盈虧比: 2.5R\n"
+                    f"------------------\n"
+                    f"🎯 目標: {target_price:.1f} | 🛑 停損: {final_stop:.1f}\n"
+                    f"{exit_rule}\n"
+                    f"💡 建議: {advice}"
+                    f"{entry_warning}\n\n"
+                    f"{get_psychology_reminder()}"
+                )
+            except:
+                result_text = f"📊 {stock_name} ({target})\n💰 現價: {price:.1f}\n(詳細數據計算失敗)"
+
+            # OO 繪圖
             fig = Figure(figsize=(10, 10))
             canvas = FigureCanvas(fig)
             
@@ -575,14 +571,13 @@ def create_stock_chart(stock_code):
             del fig; del canvas
 
         except Exception as e:
-            # 畫圖失敗，但回傳文字
-            return None, f"繪圖失敗: {str(e)}\n\n{analysis_report}"
+            return None, f"繪圖失敗: {str(e)}\n\n{result_text}"
         finally:
             gc.collect()
 
-    return result_file, analysis_report
+    return result_file, result_text
 
-# --- 8. 選股功能 (v14.8 除錯版) ---
+# --- 8. 選股功能 (v14.9 最終穩定補強版) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name == "隨機":
         all_s = set()
@@ -615,6 +610,8 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
         except:
             mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間突破單", "未知"
+            # ★ 補齊變數預設值
+            stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
             market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
 
         data = yf.download(watch_list, period="3mo", progress=False, threads=False)
@@ -687,10 +684,9 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 pos = get_position_sizing(r.total_score)
                 icon = icons[i] if i < 6 else "🔹"
                 
-                # ★ 修正：Entry Gate 呼叫 (傳遞數值)
-                entry_status, _ = check_entry_gate(r.price, r.rsi, r.ma20)
+                entry_status, _ = check_entry_gate(None, r.rsi, r.ma20)
                 if entry_status == "BAN":
-                    continue # 嚴格過濾
+                    continue 
                 
                 gate_tag = " (⚠️等回測)" if entry_status == "WAIT" else ""
 
@@ -808,7 +804,6 @@ def handle_message(event):
         t = f"🎲 {p}\n(Score評分制)\n====================\n" + "\n\n".join(r) if r else "運氣不好，沒找到強勢股。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=t))
     else:
-        # 個股診斷 (Fail-safe)
         img, txt = create_stock_chart(msg)
         if img:
             url = request.host_url.replace("http://", "https://") + 'images/' + img
