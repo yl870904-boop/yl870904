@@ -22,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v17.0 K線教學版 (移除隨機/強化K線解釋)"
+APP_VERSION = "v17.1 最終繪圖修復版 (移除plt殘留指令)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -102,7 +102,7 @@ def check_user_state(user_id):
     
     return False, ""
 
-# EPS 抓取
+# EPS 抓取 (Fast Fail)
 def get_stock_info_cached(ticker_symbol):
     if ticker_symbol in INFO_CACHE: return INFO_CACHE[ticker_symbol]
     
@@ -441,7 +441,7 @@ def check_entry_gate(current_price, rsi, ma20):
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
 
-# --- 7. 繪圖引擎 (v17.0 完整版) ---
+# --- 7. 繪圖引擎 (v17.1 最終繪圖修復版) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file = None
@@ -449,7 +449,8 @@ def create_stock_chart(stock_code):
     
     with plot_lock:
         try:
-            plt.close('all'); plt.clf()
+            # 移除舊 plt 指令
+            # plt.close('all'); plt.clf()
             
             raw_code = stock_code.upper().strip()
             if raw_code.endswith('.TW') or raw_code.endswith('.TWO'):
@@ -528,8 +529,8 @@ def create_stock_chart(stock_code):
 
             # 狀態判定
             if adx < 20: trend_quality = "盤整 (觀望) 💤"
-            elif adx > 40: trend_quality = "強勁 (勿追高) 🔥"
-            else: trend_quality = "趨勢確立 ✅"
+            elif adx > 40: trend_quality = "強勁 🔥"
+            else: trend_quality = "確立 ✅"
 
             if ma20 > ma60 and slope > 0: trend_dir = "多頭"
             elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
