@@ -21,7 +21,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v17.2 衝突邏輯修復版 (K線否決權+價值連動)"
+APP_VERSION = "v17.3 修復版 (修正 Entry Gate 參數錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -284,9 +284,9 @@ def get_valuation_status(current_price, ma60, info_data):
     if pe != 'N/A':
         try:
             pe_val = float(pe)
-            if pe_val < 10: fund_val = " | PE低估"
-            elif pe_val > 40: fund_val = " | PE高估"
-            elif pe_val < 15: fund_val = " | PE合理"
+            if pe_val < 10: fund_val = " | PE低估 (價值股)"
+            elif pe_val > 40: fund_val = " | PE高估 (成長股)"
+            elif pe_val < 15: fund_val = " | PE合理偏低"
         except: pass
     
     # 回傳文字 與 Bias 數值 (供 Gate 判斷)
@@ -301,6 +301,7 @@ def detect_market_state(index_df):
     atr_pct = (atr / last['Close']) if last['Close'] > 0 else 0
     ma20 = index_df['Close'].rolling(20).mean().iloc[-1]
     ma60 = index_df['Close'].rolling(60).mean().iloc[-1]
+    
     if ma20 > ma60 and adx > 25: return 'TREND'
     elif atr_pct < 0.012: return 'RANGE'
     else: return 'VOLATILE'
@@ -343,11 +344,17 @@ def calculate_score(df_cand, weights):
     
     df_cand['score_risk'] = score_risk
     
-    df_cand['total_score'] = (score_trend * weights['trend'] + df_cand['score_momentum'] * weights['momentum'] + score_risk * weights['risk'])
+    df_cand['total_score'] = (
+        score_trend * weights['trend'] +
+        score_mom * weights['momentum'] +
+        score_risk * weights['risk']
+    )
 
     is_aplus = (
-        (df_cand['rs_rank'] >= 0.85) & (df_cand['ma20'] > df_cand['ma60']) &
-        (df_cand['slope'] > 0) & (df_cand['vol_ratio'].between(1.5, 2.5)) &
+        (df_cand['rs_rank'] >= 0.85) &
+        (df_cand['ma20'] > df_cand['ma60']) &
+        (df_cand['slope'] > 0) &
+        (df_cand['vol_ratio'].between(1.5, 2.5)) &
         (df_cand['score_risk'] > 60)
     )
     df_cand.loc[is_aplus, 'total_score'] += 15
@@ -366,8 +373,13 @@ def get_position_sizing(score):
     elif score >= 70: return "輕倉 (0.5x) 🛡️"
     else: return "觀望 (0x) 💤"
 
-# ★ v11.0 Entry Gate (入場門檻檢查)
-def check_entry_gate(bias, rsi):
+# ★ v11.0 Entry Gate (修正參數)
+def check_entry_gate(current_price, rsi, ma20):
+    try:
+        bias = (current_price - ma20) / ma20 * 100
+    except:
+        bias = 0
+        
     if bias > 12: return "WAIT", "乖離過大"
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
@@ -476,18 +488,15 @@ def create_stock_chart(stock_code):
                         obv_warning = " (⚠️背離)"
             except: pass
 
-            entry_status, entry_msg = check_entry_gate(price, rsi, ma20) # 使用傳入的 bias_val 更準，但這裡 ma20 計算的也可
-            # 更正：check_entry_gate 內部用 MA20 算短線乖離，get_valuation 用 MA60 算長線乖離
-            # 這裡我們用 entry_gate 的結果
-            
+            # ★ v17.3 修正呼叫參數
+            entry_status, entry_msg = check_entry_gate(price, rsi, ma20)
             entry_warning = f"\n{entry_msg}" if entry_status != "PASS" else ""
 
-            # --- ★ v17.2 綜合建議邏輯 (修正衝突) ---
             advice = "觀望"
             if trend_dir == "多頭":
-                if kline_score <= -0.5: # 1. K線否決：多頭出黑三兵/吞噬
+                if kline_score <= -0.5:
                     advice = f"⚠️ 警戒：趨勢雖多，但出現空方型態 ({kline_pattern})，留意回檔"
-                elif "過熱" in valuation_status_str: # 2. 價值否決
+                elif "過熱" in valuation_status_str:
                     advice = "⛔ 價值過熱 (MA60乖離過大)，禁止追價，等待回測"
                 elif entry_status == "BAN": 
                     advice = "⛔ 指標極度過熱，禁止進場"
@@ -665,9 +674,13 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 pos = get_position_sizing(r.total_score)
                 icon = icons[i] if i < 6 else "🔹"
                 
+                # ★ v17.3 修正呼叫
                 entry_status, _ = check_entry_gate(r.price, r.rsi, r.ma20)
-                if entry_status == "BAN": continue
+                if entry_status == "BAN":
+                    continue 
+                
                 gate_tag = " (⚠️等回測)" if entry_status == "WAIT" else ""
+
                 aplus_tag = "💎 A+ 完美訊號" if getattr(r, 'is_aplus', False) else f"屬性: {trade_type}"
                 
                 info = (
