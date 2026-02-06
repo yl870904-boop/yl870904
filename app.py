@@ -23,7 +23,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v21.0 K線戰法全攻略版 (50+種進階型態辨識)"
+APP_VERSION = "v21.1 K線戰法全攻略版 (修復 C2 未定義錯誤)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -149,8 +149,7 @@ def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1):
     return pd.DataFrame()
 
 # --- 資料庫與對照表 (簡略) ---
-SECTOR_DICT = {"百元績優": ['2330.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW', '2881.TW', '1605.TW', '2382.TW', '3231.TW', '2409.TW', '2609.TW', '2615.TW', '2002.TW', '2882.TW', '0050.TW', '0056.TW']}
-# ... (請保留您完整的 SECTOR_DICT 與 CODE_NAME_MAP) ...
+SECTOR_DICT = {"百元績優": ['2303.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW', '2881.TW', '1605.TW', '2382.TW', '3231.TW', '2409.TW', '2609.TW', '2615.TW', '2002.TW', '2882.TW', '0050.TW', '0056.TW']}
 CODE_NAME_MAP = {'2330': '台積電', '2454': '聯發科', '2303': '聯電', '2317': '鴻海', '2409': '友達', '2603': '長榮', '1605': '華新', '2609': '陽明', '3481': '群創'} 
 
 def get_stock_name(stock_code):
@@ -182,7 +181,7 @@ def calculate_obv(df):
     try: return (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     except: return pd.Series([0]*len(df), index=df.index)
 
-# --- ★ v21.0 K線戰法全攻略引擎 (48型態) ---
+# --- ★ v21.1 K線戰法全攻略引擎 (修復變數定義) ---
 def detect_kline_pattern(df):
     """
     辨識 50+ 種 K 線型態，包含反轉與中繼
@@ -193,6 +192,8 @@ def detect_kline_pattern(df):
     t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]; t3 = df.iloc[-4]; t4 = df.iloc[-5]
     O0,H0,L0,C0 = t0['Open'], t0['High'], t0['Low'], t0['Close']
     O1,H1,L1,C1 = t1['Open'], t1['High'], t1['Low'], t1['Close']
+    # ★ 關鍵修復：定義 C2, O2 等變數
+    O2,H2,L2,C2 = t2['Open'], t2['High'], t2['Low'], t2['Close']
     
     # 輔助函式
     def body(r): return abs(r['Close']-r['Open'])
@@ -207,7 +208,6 @@ def detect_kline_pattern(df):
     
     # 趨勢位階判斷 (20MA vs 60MA)
     ma20 = df['Close'].rolling(20).mean().iloc[-1]
-    ma60 = df['Close'].rolling(60).mean().iloc[-1]
     trend_up = C0 > ma20
     trend_down = C0 < ma20
     
@@ -276,9 +276,10 @@ def detect_kline_pattern(df):
         return "烏雲蓋頂 (Dark Cloud) [多轉空] 🌥️", -0.8
 
     # 11. 鑷頂/底 (Tweezer)
-    if abs(t0['High'] - t1['High']) < (t0['Close']*0.001) and trend_up:
+    price = C0
+    if abs(H0 - H1) < (price * 0.002) and trend_up:
         return "鑷頂 (Tweezer Top) [雙針探頂] 🥢", -0.7
-    if abs(t0['Low'] - t1['Low']) < (t0['Close']*0.001) and trend_down:
+    if abs(L0 - L1) < (price * 0.002) and trend_down:
         return "鑷底 (Tweezer Bottom) [雙針探底] 🥢", 0.7
 
     # --- 單K線型態 ---
@@ -308,8 +309,8 @@ def detect_kline_pattern(df):
         return "長黑K (Long Black) [恐慌拋售] ⬛", -0.6
     
     # 16. 缺口 (Gap)
-    if t0['Low'] > t1['High']: return "向上跳空 (Gap Up) [強勢] 🆙", 0.5
-    if t0['High'] < t1['Low']: return "向下跳空 (Gap Down) [弱勢] ⏬", -0.5
+    if L0 > H1: return "向上跳空 (Gap Up) [強勢] 🆙", 0.5
+    if H0 < L1: return "向下跳空 (Gap Down) [弱勢] ⏬", -0.5
 
     return "整理中 (等待訊號)", 0
 
@@ -454,12 +455,15 @@ def create_stock_chart(stock_code):
             rs_str = "無數據" if rs_val == 1.0 else ("強於大盤 🦅" if rs_val > 1.05 else ("弱於大盤 🐢" if rs_val < 0.95 else "跟隨"))
             vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
 
+            # ★ v21.0 K線戰法全攻略版 - 使用完整引擎
             kline_pattern, kline_score = detect_kline_pattern(df)
+            
             valuation_status_str, bias_val = get_valuation_status(price, ma60, info_data)
 
             if adx < 20: trend_quality = "盤整 💤"
             elif adx > 40: trend_quality = "強勁 🔥"
             else: trend_quality = "確立 ✅"
+
             if ma20 > ma60 and slope > 0: trend_dir = "多頭"
             elif ma20 < ma60 and slope < 0: trend_dir = "空頭"
             else: trend_dir = "震盪"
@@ -478,9 +482,9 @@ def create_stock_chart(stock_code):
             entry_warning = f"\n{entry_msg}" if entry_status != "PASS" else ""
 
             advice = "觀望"
-            # ★ v17.2 衝突邏輯修復
+            # 整合 v21.0 K線判斷
             if trend_dir == "多頭":
-                if kline_score <= -0.5: advice = f"⚠️ 警戒：多頭遇阻，出現 {kline_pattern}"
+                if kline_score <= -0.5: advice = f"⚠️ 警戒：趨勢雖多，但{kline_pattern}，留意回檔"
                 elif "過熱" in valuation_status_str: advice = "⛔ 價值過熱，禁止追價"
                 elif entry_status == "BAN": advice = "⛔ 指標過熱，禁止進場"
                 elif entry_status == "WAIT": advice = "⏳ 短線乖離大，暫緩"
@@ -492,9 +496,10 @@ def create_stock_chart(stock_code):
                 else: advice = "趨勢向下，勿接刀"
             else:
                 if kline_score > 0.5: advice = f"震盪轉強 ({kline_pattern})，老手試單"
-                else: advice = "方向不明，觀望"
+                else: advice = "方向不明，建議觀望"
 
             exit_rule = f"🛑 **停損鐵律**：跌破 {final_stop:.1f} 市價出場。"
+
             analysis_report = (
                 f"📊 {stock_name} ({target}) 診斷\n"
                 f"💰 {price:.1f} | EPS: {eps}\n"
@@ -539,7 +544,7 @@ def create_stock_chart(stock_code):
         finally: gc.collect()
     return result_file, result_text
 
-# --- 8. 選股功能 (FinMind 分流) ---
+# --- 8. 選股功能 (移除隨機) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
@@ -553,46 +558,65 @@ def scan_potential_stocks(max_price=None, sector_name=None):
 
     try:
         try:
-            bench = fetch_data_finmind("TAIEX", days=200)
-            mkt = detect_market_state(bench)
-            w = WEIGHT_BY_STATE[mkt]
-            b_ret = bench['Close'].pct_change(20).iloc[-1]
-            market_commentary = get_market_commentary(mkt)
-            stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
-            if mkt == 'VOLATILE': return f"🔴 **市場熔斷**\n系統強制休市。", []
+            bench = get_benchmark_data()
+            if not bench.empty:
+                mkt = detect_market_state(bench)
+                w = WEIGHT_BY_STATE[mkt]
+                b_ret = bench['Close'].pct_change(20).iloc[-1]
+                market_commentary = get_market_commentary(mkt)
+                stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
+                if mkt == 'VOLATILE':
+                    return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
+            else: raise Exception("Bench Empty")
         except:
-            mkt, w, b_ret, trade_type = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間"
-            stop_mult, target_mult = 1.0, 1.5
-            market_commentary = "⚠️ 無法取得大盤狀態。"
+            mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間突破單", "未知"
+            stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
+            market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
+
+        data = yf.download(watch_list, period="3mo", progress=False, threads=False)
+        if data is None or data.empty: return title_prefix, ["Yahoo 限流中，請稍候"]
 
         for stock in watch_list:
-            time.sleep(0.2)
             try:
-                clean_code = stock.split('.')[0]
-                df = fetch_data_finmind(clean_code) # 使用 FinMind 抓股價
-                if df.empty or len(df) < 60: continue
-                price = df['Close'].iloc[-1]
+                if isinstance(data.columns, pd.MultiIndex):
+                    try:
+                        c = data['Close'][stock]; v = data['Volume'][stock]
+                        h = data['High'][stock]; l = data['Low'][stock]
+                    except: continue
+                else:
+                    c = data['Close']; v = data['Volume']; h = data['High']; l = data['Low']
+                
+                if isinstance(c, pd.DataFrame): 
+                    if c.empty: continue
+                    c=c.iloc[:,0]; v=v.iloc[:,0]; h=h.iloc[:,0]; l=l.iloc[:,0]
+
+                c = c.dropna()
+                if len(c) < 60: continue
+                price = c.iloc[-1]
                 if max_price and price > max_price: continue
 
-                ma20 = df['Close'].rolling(20).mean(); ma60 = df['Close'].rolling(60).mean()
-                v_ma = df['Volume'].rolling(20).mean()
+                ma20 = c.rolling(20).mean(); ma60 = c.rolling(60).mean()
+                v_ma = v.rolling(20).mean()
                 slope = ma20.diff(5).iloc[-1]
-                vol_r = df['Volume'].iloc[-1]/v_ma.iloc[-1] if v_ma.iloc[-1]>0 else 0
-                s_ret = df['Close'].pct_change(20).iloc[-1]
+                vol_r = v.iloc[-1]/v_ma.iloc[-1] if v_ma.iloc[-1]>0 else 0
+                s_ret = c.pct_change(20).iloc[-1]
                 rs = (1+s_ret)/(1+b_ret)
-                tr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
+                tr = (h-l).rolling(14).mean().iloc[-1]
                 atr = tr if tr > 0 else price*0.02
-                delta = df['Close'].diff()
+                
+                delta = c.diff()
                 gain = (delta.where(delta>0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta<0, 0)).rolling(14).mean()
                 rs_idx = gain/loss
                 rsi = 100-(100/(1+rs_idx))
                 curr_rsi = rsi.iloc[-1]
+                curr_ma20 = ma20.iloc[-1]; curr_ma60 = ma60.iloc[-1]
 
-                if ma20.iloc[-1] > ma60.iloc[-1] and slope > 0:
+                if curr_ma20 > curr_ma60 and slope > 0:
                     candidates.append({
-                        'stock': stock, 'price': price, 'ma20': ma20.iloc[-1], 'ma60': ma60.iloc[-1],
-                        'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0, 'rsi': curr_rsi 
+                        'stock': stock, 'price': price, 'ma20': curr_ma20, 'ma60': curr_ma60,
+                        'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0,
+                        'rsi': curr_rsi 
                     })
             except: continue
 
@@ -600,6 +624,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             df = pd.DataFrame(candidates)
             df['rs_rank'] = df['rs_raw'].rank(pct=True)
             df = calculate_score(df, w)
+            
             th = 70 if mkt == 'RANGE' else 60
             df = df.sort_values('total_score', ascending=False)
             picks = df[df['total_score']>=th].head(6)
@@ -611,6 +636,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 target = r.price + r.atr * target_mult
                 pos = get_position_sizing(r.total_score)
                 icon = icons[i] if i < 6 else "🔹"
+                
                 entry_status, _ = check_entry_gate(r.price, r.rsi, r.ma20)
                 if entry_status == "BAN": continue
                 gate_tag = " (⚠️等回測)" if entry_status == "WAIT" else ""
