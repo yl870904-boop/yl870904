@@ -3,7 +3,6 @@ import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
-# 改用物件導向繪圖
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.font_manager import FontProperties
@@ -23,7 +22,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v22.0 穩定修復版 (修復選股錯誤+移除隨機)"
+APP_VERSION = "v23.0 語意辨識增強版 (修正指令誤判+RS三保險)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -79,18 +78,22 @@ def check_user_state(user_id):
     if user_id not in USER_USAGE:
         USER_USAGE[user_id] = {'last_time': now, 'count': 1, 'cooldown_until': None}
         return False, ""
+    
     user_data = USER_USAGE[user_id]
     if user_data['cooldown_until'] and now < user_data['cooldown_until']:
         remaining = int((user_data['cooldown_until'] - now).total_seconds() / 60)
         return True, f"⛔ **情緒熔斷啟動**\n操作過頻，強制冷靜 {remaining} 分鐘。"
+    
     if (now - user_data['last_time']).total_seconds() < WINDOW_SECONDS:
         user_data['count'] += 1
     else:
         user_data['count'] = 1
         user_data['last_time'] = now
+    
     if user_data['count'] > MAX_REQUESTS_PER_WINDOW:
         user_data['cooldown_until'] = now + timedelta(seconds=COOLDOWN_SECONDS)
         return True, f"⛔ **過度交易警示**\n頻率過高，系統鎖定 10 分鐘。"
+    
     return False, ""
 
 # FinMind API
@@ -109,14 +112,31 @@ def call_finmind_api(dataset, data_id, start_date=None, days=365):
     except: pass
     return pd.DataFrame()
 
+def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1):
+    for i in range(retries):
+        try:
+            df = yf.download(ticker.ticker, period=period, progress=False, threads=False)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    try: df = df.xs(ticker.ticker, axis=1, level=1)
+                    except: pass
+                return df
+            time.sleep(0.5)
+        except: time.sleep(delay)
+    return pd.DataFrame()
+
 def fetch_data_finmind(stock_code):
     clean_code = stock_code.split('.')[0]
     df = call_finmind_api("TaiwanStockPrice", clean_code, days=400)
     if df.empty: return fetch_data_with_retry(yf.Ticker(stock_code), period="1y")
+    
+    # 格式整理
     df = df.rename(columns={'date':'Date','open':'Open','max':'High','min':'Low','close':'Close','Trading_Volume':'Volume'})
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.set_index('Date')
-    for c in ['Open','High','Low','Close','Volume']: df[c] = pd.to_numeric(df[c], errors='coerce')
+    for c in ['Open','High','Low','Close','Volume']: 
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce')
+    
     return df
 
 def get_stock_info_finmind(stock_code):
@@ -135,48 +155,45 @@ def get_eps_from_price_pe(price, pe):
     except: pass
     return 'N/A'
 
-def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1):
-    for i in range(retries):
-        try:
-            df = yf.download(ticker.ticker, period=period, progress=False, threads=False)
-            if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    try: df = df.xs(ticker.ticker, axis=1, level=1)
-                    except: pass
-                return df
-            time.sleep(0.5)
-        except: time.sleep(delay)
-    return pd.DataFrame()
-
+# ★ 優化：大盤抓取 (三保險)
 def get_benchmark_data():
     now = time.time()
     if BENCHMARK_CACHE['data'] is not None and (now - BENCHMARK_CACHE['time']) < 3600:
         return BENCHMARK_CACHE['data']
     
-    # 優先嘗試 FinMind TAIEX
+    # 1. FinMind TAIEX
     try:
         bench = fetch_data_finmind("TAIEX")
-        if not bench.empty:
-            BENCHMARK_CACHE['data'] = bench
-            BENCHMARK_CACHE['time'] = now
+        if not bench.empty and len(bench) > 20:
+            BENCHMARK_CACHE['data'] = bench; BENCHMARK_CACHE['time'] = now
             return bench
     except: pass
 
-    # 備援 Yahoo 0050.TW
+    # 2. Yahoo 0050.TW
     try:
         bench = yf.download("0050.TW", period="1y", progress=False, threads=False)
         if not bench.empty:
              if isinstance(bench.columns, pd.MultiIndex):
                  try: bench = bench.xs("0050.TW", axis=1, level=1)
                  except: pass
-             BENCHMARK_CACHE['data'] = bench
-             BENCHMARK_CACHE['time'] = now
+             BENCHMARK_CACHE['data'] = bench; BENCHMARK_CACHE['time'] = now
+             return bench
+    except: pass
+
+    # 3. Yahoo ^TWII (加權指數)
+    try:
+        bench = yf.download("^TWII", period="1y", progress=False, threads=False)
+        if not bench.empty:
+             if isinstance(bench.columns, pd.MultiIndex):
+                 try: bench = bench.xs("^TWII", axis=1, level=1)
+                 except: pass
+             BENCHMARK_CACHE['data'] = bench; BENCHMARK_CACHE['time'] = now
              return bench
     except: pass
 
     return pd.DataFrame()
 
-# --- 資料庫與對照表 ---
+# --- 資料庫 ---
 SECTOR_DICT = {
     "百元績優": ['2303.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW', '2881.TW', '1605.TW', '2382.TW', '3231.TW', '2409.TW', '2609.TW', '2615.TW', '2002.TW', '2882.TW', '0050.TW', '0056.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '3481.TW', '2408.TW', '2344.TW', '2337.TW', '3702.TW', '2312.TW', '6282.TW', '3260.TWO', '8150.TW', '6147.TWO', '5347.TWO', '2363.TW', '2449.TW', '3036.TW', '2884.TW', '2880.TW', '2886.TW', '2891.TW', '2892.TW', '5880.TW', '2885.TW', '2890.TW', '2883.TW', '2887.TW', '2881.TW', '2834.TW', '2801.TW', '1101.TW', '1102.TW', '2027.TW', '1402.TW', '1907.TW', '2105.TW', '2618.TW', '2610.TW', '9945.TW', '2542.TW', '00878.TW', '00929.TW', '00919.TW'],
     "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
@@ -219,63 +236,64 @@ def calculate_obv(df):
     try: return (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     except: return pd.Series([0]*len(df), index=df.index)
 
-# --- ★ v21.1 K線戰法全攻略引擎 ---
+# --- K線辨識 ---
 def detect_kline_pattern(df):
     if len(df) < 5: return "資料不足", 0
-    t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]; t3 = df.iloc[-4]; t4 = df.iloc[-5]
-    O0,H0,L0,C0 = t0['Open'], t0['High'], t0['Low'], t0['Close']
-    O1,H1,L1,C1 = t1['Open'], t1['High'], t1['Low'], t1['Close']
-    O2,H2,L2,C2 = t2['Open'], t2['High'], t2['Low'], t2['Close']
+    t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]
     
-    def body(r): return abs(r['Close']-r['Open'])
-    def upper(r): return r['High'] - max(r['Close'], r['Open'])
-    def lower(r): return min(r['Close'], r['Open']) - r['Low']
-    def is_red(r): return r['Close'] > r['Open']
-    def is_green(r): return r['Close'] < r['Open']
-    def is_doji(r): return body(r) < (r['High']-r['Low']) * 0.1
+    def get_body(row): return abs(row['Close'] - row['Open'])
+    def get_upper(row): return row['High'] - max(row['Close'], row['Open'])
+    def get_lower(row): return min(row['Close'], row['Open']) - row['Low']
+    def is_red(row): return row['Close'] > row['Open']
+    def is_green(row): return row['Close'] < row['Open']
     
-    avg_body = np.mean([body(df.iloc[-i]) for i in range(1, 6)])
+    body0 = get_body(t0)
+    avg_body = np.mean([get_body(df.iloc[-i]) for i in range(1, 6)])
     if avg_body == 0: avg_body = 0.1
     
     ma20 = df['Close'].rolling(20).mean().iloc[-1]
-    trend_up = C0 > ma20
-    trend_down = C0 < ma20
+    trend_up = t0['Close'] > ma20
+    trend_down = t0['Close'] < ma20
     
-    # 晨星
-    if is_green(t2) and body(t2) > avg_body and \
-       body(t1) < avg_body*0.5 and t1['Close'] < C2 and \
-       is_red(t0) and C0 > (t2['Open']+t2['Close'])/2:
+    # 晨星/夜星
+    if is_green(t2) and get_body(t1) < avg_body * 0.5 and is_red(t0) and t0['Close'] > (t2['Open']+t2['Close'])/2:
        return "晨星 (黎明將至) [空轉多] 🌅", 0.95
-    # 夜星
-    if is_red(t2) and body(t2) > avg_body and \
-       body(t1) < avg_body*0.5 and t1['Close'] > C2 and \
-       is_green(t0) and C0 < (t2['Open']+t2['Close'])/2:
+    if is_red(t2) and get_body(t1) < avg_body * 0.5 and is_green(t0) and t0['Close'] < (t2['Open']+t2['Close'])/2:
        return "夜星 (黑夜降臨) [多轉空] 🌃", -0.95
     # 吞噬
-    if is_green(t1) and is_red(t0) and C0 > t1['Open'] and O0 < t1['Close']:
+    if is_green(t1) and is_red(t0) and t0['Close'] > t1['Open'] and t0['Open'] < t1['Close']:
         return "多頭吞噬 (一舉扭轉) [空轉多] 🔥", 0.9
-    if is_red(t1) and is_green(t0) and C0 < t1['Open'] and O0 > t1['Close']:
+    if is_red(t1) and is_green(t0) and t0['Close'] < t1['Open'] and t0['Open'] > t1['Close']:
         return "空頭吞噬 (空方反撲) [多轉空] 🌧️", -0.9
-    # 貫穿
-    if is_green(t1) and is_red(t0) and O0 < t1['Low'] and C0 > (t1['Open']+t1['Close'])/2:
+    # 貫穿/烏雲
+    if is_green(t1) and is_red(t0) and t0['Open'] < t1['Low'] and t0['Close'] > (t1['Open']+t1['Close'])/2:
         return "貫穿線 (多方反擊) [空轉多] 🗡️", 0.8
-    # 烏雲
-    if is_red(t1) and is_green(t0) and O0 > t1['High'] and C0 < (t1['Open']+t1['Close'])/2:
+    if is_red(t1) and is_green(t0) and t0['Open'] > t1['High'] and t0['Close'] < (t1['Open']+t1['Close'])/2:
         return "烏雲蓋頂 (空方壓頂) [多轉空] 🌥️", -0.8
-    # 錘頭/上吊
-    if lower(t0) > 2 * body(t0) and upper(t0) < body(t0) * 0.2:
+    # 錘頭/流星
+    if get_lower(t0) > 2 * body0 and get_upper(t0) < body0 * 0.5:
         if trend_down: return "錘頭 (底部支撐) [空轉多] 🔨", 0.7
         if trend_up: return "上吊線 (主力出貨?) [多轉空] 🎗️", -0.6
-    # 倒錘/流星
-    if upper(t0) > 2 * body(t0) and lower(t0) < body(t0) * 0.2:
+    if get_upper(t0) > 2 * body0 and get_lower(t0) < body0 * 0.5:
         if trend_up: return "流星 (高檔避雷針) [多轉空] ☄️", -0.7
         if trend_down: return "倒狀錘頭 (試盤訊號) [醞釀反彈] ☝️", 0.4
     # 三兵
-    if is_red(t0) and is_red(t1) and is_red(t2) and C0>C1>C2:
+    if is_red(t0) and is_red(t1) and is_red(t2) and t0['Close']>t1['Close']>t2['Close']:
         return "紅三兵 (多頭氣盛) [多頭持續] 💂‍♂️", 0.8
-    if is_green(t0) and is_green(t1) and is_green(t2) and C0<C1<C2:
+    if is_green(t0) and is_green(t1) and is_green(t2) and t0['Close']<t1['Close']<t2['Close']:
         return "黑三兵 (烏鴉滿天) [空頭持續] 🐻", -0.8
     
+    # 特殊型態：鳥嘴 (5日金叉20日，且開口擴大)
+    ma5 = df['Close'].rolling(5).mean().iloc[-1]
+    prev_ma5 = df['Close'].rolling(5).mean().iloc[-2]
+    prev_ma20 = df['Close'].rolling(20).mean().iloc[-2]
+    if prev_ma5 <= prev_ma20 and ma5 > ma20 and ma5 > prev_ma5 and ma20 > prev_ma20:
+        return "鳥嘴攻擊型態 [趨勢啟動] 🐦", 0.9
+
+    # 屁股 (W底雛形) - 紅黑紅 且低點墊高
+    if is_red(t0) and is_green(t1) and is_red(t2) and t0['Low'] > t2['Low'] and trend_down:
+         return "W底雛形 (屁股型態) [見底訊號] 🍑", 0.7
+
     return "整理中 (等待訊號)", 0
 
 # --- 價值與狀態 ---
@@ -367,12 +385,19 @@ def create_stock_chart(stock_code):
             if raw_code.endswith('.TW') or raw_code.endswith('.TWO'): target = raw_code
             else: target = raw_code + ".TW"
             
+            # 使用 FinMind (優先)
             df = fetch_data_finmind(target)
             if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
                 target_two = raw_code + ".TWO"
                 df = fetch_data_finmind(target_two)
                 if not df.empty: target = target_two
-            if df.empty: return None, "FinMind/Yahoo 皆查無資料。"
+            
+            # FinMind 失敗則用 YFinance
+            if df.empty:
+                target = raw_code + ".TW"
+                df = fetch_data_with_retry(yf.Ticker(target), period="1y")
+
+            if df.empty: return None, "查無資料，請確認代號。"
             
             stock_name = get_stock_name(target)
             info_data = get_stock_info_finmind(target)
@@ -380,8 +405,9 @@ def create_stock_chart(stock_code):
             price = last['Close']
             eps = get_eps_from_price_pe(price, info_data.get('pe'))
 
+            # RS
             try:
-                bench = get_benchmark_data() # 改用 get_benchmark_data (已含雙保險)
+                bench = get_benchmark_data()
                 if not bench.empty:
                     common = df.index.intersection(bench.index)
                     if len(common) > 20:
@@ -415,20 +441,13 @@ def create_stock_chart(stock_code):
             rsi = last['RSI'] if not pd.isna(last['RSI']) else 50
             adx = last['ADX'] if not pd.isna(last['ADX']) else 0
             atr = last['ATR'] if not pd.isna(last['ATR']) and last['ATR'] > 0 else price*0.02
-            
-            # 修正 RS 顯示
             rs_val = last['RS'] if 'RS' in df.columns and not pd.isna(last['RS']) else 1.0
-            if rs_val == 1.0: rs_str = "無數據"
-            elif rs_val > 1.05: rs_str = "強於大盤 🦅"
-            elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
-            else: rs_str = "跟隨大盤"
-
+            rs_str = "無數據" if rs_val == 1.0 else ("強於大盤 🦅" if rs_val > 1.05 else ("弱於大盤 🐢" if rs_val < 0.95 else "跟隨"))
             vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
 
             kline_pattern, kline_score = detect_kline_pattern(df)
             valuation_status_str, bias_val = get_valuation_status(price, ma60, info_data)
 
-            # 狀態判定
             if adx < 20: trend_quality = "盤整 💤"
             elif adx > 40: trend_quality = "強勁 🔥"
             else: trend_quality = "確立 ✅"
@@ -441,18 +460,10 @@ def create_stock_chart(stock_code):
             final_stop = max(stop, ma20) if trend_dir == "多頭" and ma20 < price else stop
             target_price_val = price + atr * 3 
 
-            obv_warning = ""
-            try:
-                if len(df) > 10:
-                    if df['Close'].iloc[-1] > df['Close'].iloc[-10] and df['OBV'].iloc[-1] < df['OBV'].iloc[-10]:
-                        obv_warning = " (⚠️背離)"
-            except: pass
-
             entry_status, entry_msg = check_entry_gate(bias_val, rsi)
             entry_warning = f"\n{entry_msg}" if entry_status != "PASS" else ""
 
             advice = "觀望"
-            # v17.2 衝突邏輯修復
             if trend_dir == "多頭":
                 if kline_score <= -0.5: advice = f"⚠️ 警戒：趨勢雖多，但{kline_pattern.split(' ')[0]}，留意回檔"
                 elif "過熱" in valuation_status_str: advice = "⛔ 價值過熱，禁止追價"
@@ -471,13 +482,12 @@ def create_stock_chart(stock_code):
                 else: advice = "方向不明，建議觀望"
 
             exit_rule = f"🛑 **停損鐵律**：跌破 {final_stop:.1f} 市價出場。"
-
             analysis_report = (
                 f"📊 {stock_name} ({target}) 診斷\n"
-                f"💰 {price:.1f} | EPS: {eps}\n"
-                f"📈 {trend_dir} | {trend_quality}\n"
-                f"🕯️ {kline_pattern}\n"
-                f"💎 {valuation_status_str}\n"
+                f"💰 現價: {price:.1f} | EPS: {eps}\n"
+                f"📈 趨勢: {trend_dir} | {trend_quality}\n"
+                f"🕯️ K線: {kline_pattern}\n"
+                f"💎 價值: {valuation_status_str}\n"
                 f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
                 f"------------------\n"
                 f"🎯 目標: {target_price_val:.1f} | 🛑 停損: {final_stop:.1f}\n"
@@ -486,7 +496,6 @@ def create_stock_chart(stock_code):
                 f"{entry_warning}\n\n"
                 f"{get_psychology_reminder()}"
             )
-            
             result_text = analysis_report
 
             fig = Figure(figsize=(10, 10))
@@ -517,7 +526,7 @@ def create_stock_chart(stock_code):
         finally: gc.collect()
     return result_file, result_text
 
-# --- 8. 選股功能 (移除隨機/修正參數) ---
+# --- 8. 選股功能 (移除隨機) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
@@ -538,18 +547,20 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 b_ret = bench['Close'].pct_change(20).iloc[-1]
                 market_commentary = get_market_commentary(mkt)
                 stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
-                if mkt == 'VOLATILE': return f"🔴 **市場熔斷啟動**\n系統已強制停止選股功能。", []
+                if mkt == 'VOLATILE': return f"🔴 **市場熔斷啟動**\n系統強制休市。", []
             else: raise Exception("Bench Empty")
         except:
             mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間", "未知"
             stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
-            market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
+            market_commentary = "⚠️ 無法取得大盤狀態。"
 
+        # 這裡改用 FinMind 逐檔抓取 (比 Yahoo 穩定)
+        # 由於 FinMind 有頻率限制，掃描 50 檔可能會慢，但比 Yahoo 被擋好
         for stock in watch_list:
-            time.sleep(0.2)
+            time.sleep(0.1) # 小延遲防擋
             try:
                 clean_code = stock.split('.')[0]
-                df = fetch_data_finmind(clean_code) # FinMind
+                df = fetch_data_finmind(clean_code)
                 if df.empty or len(df) < 60: continue
                 price = df['Close'].iloc[-1]
                 if max_price and price > max_price: continue
@@ -593,11 +604,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 target = r.price + r.atr * target_mult
                 pos = get_position_sizing(r.total_score)
                 icon = icons[i] if i < 6 else "🔹"
-                
-                # ★ 修正呼叫參數：只傳 rsi, bias
-                bias_val = (r.price - r.ma20) / r.ma20 * 100
-                entry_status, _ = check_entry_gate(bias_val, r.rsi)
-                
+                entry_status, _ = check_entry_gate(r.price, r.rsi, r.ma20) # 修正呼叫
                 if entry_status == "BAN": continue
                 gate_tag = " (⚠️等回測)" if entry_status == "WAIT" else ""
                 aplus_tag = "💎 A+ 完美訊號" if getattr(r, 'is_aplus', False) else f"屬性: {trade_type}"
@@ -650,6 +657,8 @@ def handle_message(event):
         txt = (
             "🎓 **股市小白 專有名詞懶人包**\n"
             "======================\n\n"
+            "💎 **A+ 完美訊號**\n"
+            "• 趨勢、資金、量能滿分。\n\n"
             "🕯️ **K線教學 (多轉空/空轉多)**\n"
             "• 🌅 **晨星**: [空轉多] 跌勢末端出現一根紅K吃掉黑K，黎明將至。\n"
             "• 🌃 **夜星**: [多轉空] 漲勢末端出現黑K吞噬紅K，黑夜降臨。\n"
@@ -662,20 +671,30 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=txt))
         return
 
+    # 指令模糊辨識
+    if any(x in msg for x in ["小資", "便宜"]):
+        msg = "百元推薦"
+    elif any(x in msg for x in ["績優"]):
+        msg = "百元績優推薦" # 觸發 sector_hit 邏輯
+    elif any(x in msg for x in ["智能", "選股", "幫我選"]):
+        msg = "推薦"
+
     if msg in ["功能", "指令", "Help", "help", "menu"]:
         menu = (
             f"🤖 **股市全能助理** ({APP_VERSION})\n"
             "======================\n\n"
             "🔍 **個股診斷**\n"
             "輸入：`2330` 或 `8069`\n"
-            "👉 K線型態、市場價值、教練建議\n\n"
+            "👉 線圖、K線型態、價值評估、教練建議\n\n"
             "📊 **智能選股 (自適應)**\n"
-            "輸入：`推薦` 或 `選股`\n"
+            "輸入：`推薦` 或 `智能選股`\n"
             "👉 自動偵測盤勢，A+訊號優先展示\n\n"
             "💰 **小資選股**\n"
-            "輸入：`百元推薦`\n\n"
+            "輸入：`百元推薦` 或 `小資`\n"
+            "👉 掃描 100 元以內的強勢股\n\n"
             "🏅 **績優選股**\n"
-            "輸入：`百元績優推薦`\n\n"
+            "輸入：`績優股`\n"
+            "👉 掃描 50 檔精選績優股\n\n"
             "🏭 **板塊推薦**\n"
             "輸入：`[名稱]推薦` (如：`半導體推薦`)\n\n"
             "📖 **K線教學**\n"
