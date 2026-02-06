@@ -23,7 +23,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v21.1 K線戰法全攻略版 (修復 C2 未定義錯誤)"
+APP_VERSION = "v22.0 穩定修復版 (修復選股錯誤+移除隨機)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -148,9 +148,47 @@ def fetch_data_with_retry(ticker, period="1y", retries=2, delay=1):
         except: time.sleep(delay)
     return pd.DataFrame()
 
-# --- 資料庫與對照表 (簡略) ---
-SECTOR_DICT = {"百元績優": ['2303.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW', '2881.TW', '1605.TW', '2382.TW', '3231.TW', '2409.TW', '2609.TW', '2615.TW', '2002.TW', '2882.TW', '0050.TW', '0056.TW']}
-CODE_NAME_MAP = {'2330': '台積電', '2454': '聯發科', '2303': '聯電', '2317': '鴻海', '2409': '友達', '2603': '長榮', '1605': '華新', '2609': '陽明', '3481': '群創'} 
+def get_benchmark_data():
+    now = time.time()
+    if BENCHMARK_CACHE['data'] is not None and (now - BENCHMARK_CACHE['time']) < 3600:
+        return BENCHMARK_CACHE['data']
+    
+    # 優先嘗試 FinMind TAIEX
+    try:
+        bench = fetch_data_finmind("TAIEX")
+        if not bench.empty:
+            BENCHMARK_CACHE['data'] = bench
+            BENCHMARK_CACHE['time'] = now
+            return bench
+    except: pass
+
+    # 備援 Yahoo 0050.TW
+    try:
+        bench = yf.download("0050.TW", period="1y", progress=False, threads=False)
+        if not bench.empty:
+             if isinstance(bench.columns, pd.MultiIndex):
+                 try: bench = bench.xs("0050.TW", axis=1, level=1)
+                 except: pass
+             BENCHMARK_CACHE['data'] = bench
+             BENCHMARK_CACHE['time'] = now
+             return bench
+    except: pass
+
+    return pd.DataFrame()
+
+# --- 資料庫與對照表 ---
+SECTOR_DICT = {
+    "百元績優": ['2303.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW', '2881.TW', '1605.TW', '2382.TW', '3231.TW', '2409.TW', '2609.TW', '2615.TW', '2002.TW', '2882.TW', '0050.TW', '0056.TW', '2324.TW', '2356.TW', '2353.TW', '2352.TW', '3481.TW', '2408.TW', '2344.TW', '2337.TW', '3702.TW', '2312.TW', '6282.TW', '3260.TWO', '8150.TW', '6147.TWO', '5347.TWO', '2363.TW', '2449.TW', '3036.TW', '2884.TW', '2880.TW', '2886.TW', '2891.TW', '2892.TW', '5880.TW', '2885.TW', '2890.TW', '2883.TW', '2887.TW', '2881.TW', '2834.TW', '2801.TW', '1101.TW', '1102.TW', '2027.TW', '1402.TW', '1907.TW', '2105.TW', '2618.TW', '2610.TW', '9945.TW', '2542.TW', '00878.TW', '00929.TW', '00919.TW'],
+    "半導體": ['2330.TW', '2454.TW', '2303.TW', '3711.TW', '3034.TW', '2379.TW', '3443.TW', '3035.TW', '3661.TW'],
+    "電子": ['2317.TW', '2382.TW', '3231.TW', '2353.TW', '2357.TW', '2324.TW', '2301.TW', '2356.TW'],
+    "航運": ['2603.TW', '2609.TW', '2615.TW', '2618.TW', '2610.TW', '2637.TW', '2606.TW'],
+    "金融": ['2881.TW', '2882.TW', '2886.TW', '2891.TW', '2892.TW', '2884.TW', '5880.TW', '2880.TW', '2885.TW'],
+    "AI": ['3231.TW', '2382.TW', '6669.TW', '2376.TW', '2356.TW', '3017.TW'],
+}
+
+CODE_NAME_MAP = {
+    '2330': '台積電', '2454': '聯發科', '2303': '聯電', '2317': '鴻海', '2409': '友達', '2603': '長榮', '1605': '華新', '2609': '陽明', '3481': '群創', '2615': '萬海', '2618': '長榮航', '2610': '華航', '2637': '慧洋', '2606': '裕民', '2002': '中鋼', '2014': '中鴻', '2027': '大成鋼', '1301': '台塑', '1402': '遠東新', '1101': '台泥', '2881': '富邦金', '2882': '國泰金', '0050': '元大台灣50', '0056': '元大高股息', '3231': '緯創', '2382': '廣達', '2376': '技嘉', '2356': '英業達', '3037': '欣興', '2324': '仁寶', '2357': '華碩', '5880': '合庫金', '2891': '中信金', '2892': '第一金', '2886': '兆豐金', '2884': '玉山金', '2885': '元大金', '2890': '永豐金', '2883': '開發金', '2887': '台新金', '2880': '華南金', '2834': '臺企銀', '2801': '彰銀', '1102': '亞泥', '1907': '永豐餘', '2105': '正新', '9945': '潤泰新', '2542': '興富發', '00878': '國泰永續', '00929': '復華科優息', '00919': '群益精選', '2353': '宏碁', '2352': '佳世達', '2408': '南亞科', '2344': '華邦電', '2337': '旺宏', '3702': '大聯大', '2312': '金寶', '6282': '康舒', '3260': '威剛', '8150': '南茂', '6147': '頎邦', '5347': '世界', '2363': '矽統', '2449': '京元電', '3036': '文曄'
+}
 
 def get_stock_name(stock_code):
     code_only = stock_code.split('.')[0]
@@ -181,21 +219,14 @@ def calculate_obv(df):
     try: return (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     except: return pd.Series([0]*len(df), index=df.index)
 
-# --- ★ v21.1 K線戰法全攻略引擎 (修復變數定義) ---
+# --- ★ v21.1 K線戰法全攻略引擎 ---
 def detect_kline_pattern(df):
-    """
-    辨識 50+ 種 K 線型態，包含反轉與中繼
-    """
     if len(df) < 5: return "資料不足", 0
-    
-    # 取得資料
     t0 = df.iloc[-1]; t1 = df.iloc[-2]; t2 = df.iloc[-3]; t3 = df.iloc[-4]; t4 = df.iloc[-5]
     O0,H0,L0,C0 = t0['Open'], t0['High'], t0['Low'], t0['Close']
     O1,H1,L1,C1 = t1['Open'], t1['High'], t1['Low'], t1['Close']
-    # ★ 關鍵修復：定義 C2, O2 等變數
     O2,H2,L2,C2 = t2['Open'], t2['High'], t2['Low'], t2['Close']
     
-    # 輔助函式
     def body(r): return abs(r['Close']-r['Open'])
     def upper(r): return r['High'] - max(r['Close'], r['Open'])
     def lower(r): return min(r['Close'], r['Open']) - r['Low']
@@ -206,112 +237,45 @@ def detect_kline_pattern(df):
     avg_body = np.mean([body(df.iloc[-i]) for i in range(1, 6)])
     if avg_body == 0: avg_body = 0.1
     
-    # 趨勢位階判斷 (20MA vs 60MA)
     ma20 = df['Close'].rolling(20).mean().iloc[-1]
     trend_up = C0 > ma20
     trend_down = C0 < ma20
     
-    # --- 三K線型態 (最強烈) ---
-    
-    # 1. 晨星 (Morning Star) [空轉多]
+    # 晨星
     if is_green(t2) and body(t2) > avg_body and \
        body(t1) < avg_body*0.5 and t1['Close'] < C2 and \
        is_red(t0) and C0 > (t2['Open']+t2['Close'])/2:
-       return "晨星 (Morning Star) [空轉多] 🌅", 0.95
-       
-    # 2. 夜星 (Evening Star) [多轉空]
+       return "晨星 (黎明將至) [空轉多] 🌅", 0.95
+    # 夜星
     if is_red(t2) and body(t2) > avg_body and \
        body(t1) < avg_body*0.5 and t1['Close'] > C2 and \
        is_green(t0) and C0 < (t2['Open']+t2['Close'])/2:
-       return "夜星 (Evening Star) [多轉空] 🌃", -0.95
-
-    # 3. 紅三兵 (Three White Soldiers) [多頭持續/轉強]
-    if is_red(t0) and is_red(t1) and is_red(t2) and \
-       C0>C1>C2 and body(t0)>avg_body*0.5:
-       if trend_down: return "紅三兵 (低檔轉強) [空轉多] 💂‍♂️", 0.85
-       return "紅三兵 (多頭續攻) [多頭持續] 💂‍♂️", 0.8
-
-    # 4. 黑三兵 (Three Black Crows) [空頭持續/轉弱]
-    if is_green(t0) and is_green(t1) and is_green(t2) and \
-       C0<C1<C2 and body(t0)>avg_body*0.5:
-       if trend_up: return "黑三兵 (高檔反轉) [多轉空] 🐻", -0.85
-       return "黑三兵 (空頭屠殺) [空頭持續] 🐻", -0.8
-       
-    # 5. 三法 (Rising/Falling Three) [中繼再漲/跌]
-    # 大紅K -> 3根小黑K都在大紅K內 -> 大紅K創新高
-    if is_red(t4) and is_red(t0) and C0 > t4['Close'] and \
-       is_green(t3) and is_green(t2) and is_green(t1) and \
-       t1['Low'] > t4['Low']:
-       return "上升三法 (Rising Three) [多頭中繼] 📈", 0.8
-    
-    # 6. 大敵當前 (Advance Block) [多轉空警戒]
-    if is_red(t0) and is_red(t1) and is_red(t2) and \
-       upper(t0) > body(t0) and body(t0) < body(t1):
-       return "大敵當前 (漲勢受阻) [多頭力竭] 🚧", -0.4
-
-    # --- 雙K線型態 ---
-
-    # 7. 吞噬 (Engulfing)
+       return "夜星 (黑夜降臨) [多轉空] 🌃", -0.95
+    # 吞噬
     if is_green(t1) and is_red(t0) and C0 > t1['Open'] and O0 < t1['Close']:
-        return "多頭吞噬 (Bull Engulfing) [空轉多] 🔥", 0.9
+        return "多頭吞噬 (一舉扭轉) [空轉多] 🔥", 0.9
     if is_red(t1) and is_green(t0) and C0 < t1['Open'] and O0 > t1['Close']:
-        return "空頭吞噬 (Bear Engulfing) [多轉空] 🌧️", -0.9
-
-    # 8. 母子 (Harami)
-    if is_green(t1) and body(t1) > avg_body and \
-       is_red(t0) and body(t0) < body(t1)*0.5 and \
-       C0 < t1['Open'] and O0 > t1['Close']:
-       return "多頭母子 (Harami) [醞釀反彈] 🤰", 0.6
-    if is_red(t1) and body(t1) > avg_body and \
-       is_green(t0) and body(t0) < body(t1)*0.5 and \
-       C0 > t1['Open'] and O0 < t1['Close']:
-       return "空頭母子 (Harami) [高檔變盤] 🤰", -0.6
-
-    # 9. 貫穿線 (Piercing) [空轉多]
+        return "空頭吞噬 (空方反撲) [多轉空] 🌧️", -0.9
+    # 貫穿
     if is_green(t1) and is_red(t0) and O0 < t1['Low'] and C0 > (t1['Open']+t1['Close'])/2:
-        return "貫穿線 (Piercing Line) [空轉多] 🗡️", 0.8
-    
-    # 10. 烏雲蓋頂 (Dark Cloud Cover) [多轉空]
+        return "貫穿線 (多方反擊) [空轉多] 🗡️", 0.8
+    # 烏雲
     if is_red(t1) and is_green(t0) and O0 > t1['High'] and C0 < (t1['Open']+t1['Close'])/2:
-        return "烏雲蓋頂 (Dark Cloud) [多轉空] 🌥️", -0.8
-
-    # 11. 鑷頂/底 (Tweezer)
-    price = C0
-    if abs(H0 - H1) < (price * 0.002) and trend_up:
-        return "鑷頂 (Tweezer Top) [雙針探頂] 🥢", -0.7
-    if abs(L0 - L1) < (price * 0.002) and trend_down:
-        return "鑷底 (Tweezer Bottom) [雙針探底] 🥢", 0.7
-
-    # --- 單K線型態 ---
-
-    # 12. 錘頭 (Hammer) & 上吊 (Hanging Man)
+        return "烏雲蓋頂 (空方壓頂) [多轉空] 🌥️", -0.8
+    # 錘頭/上吊
     if lower(t0) > 2 * body(t0) and upper(t0) < body(t0) * 0.2:
-        if trend_down: return "錘頭 (Hammer) [底部支撐] 🔨", 0.7
-        if trend_up: return "上吊線 (Hanging Man) [多轉空] 🎗️", -0.6
-    
-    # 13. 流星 (Shooting Star) & 倒錘 (Inverted Hammer)
+        if trend_down: return "錘頭 (底部支撐) [空轉多] 🔨", 0.7
+        if trend_up: return "上吊線 (主力出貨?) [多轉空] 🎗️", -0.6
+    # 倒錘/流星
     if upper(t0) > 2 * body(t0) and lower(t0) < body(t0) * 0.2:
-        if trend_up: return "流星 (Shooting Star) [高檔避雷針] ☄️", -0.7
-        if trend_down: return "倒狀錘頭 (Inverted Hammer) [試盤/反彈] ☝️", 0.4
-
-    # 14. 特殊十字星
-    if is_doji(t0):
-        if upper(t0) > avg_body and lower(t0) < avg_body * 0.2:
-            return "墓碑十字 (Gravestone) [多轉空] 🪦", -0.8
-        if lower(t0) > avg_body and upper(t0) < avg_body * 0.2:
-            return "蜻蜓十字 (Dragonfly) [空轉多] 🦗", 0.8
-        return "十字星 (Doji) [多空觀望] ➕", 0
-
-    # 15. 大K線
-    if is_red(t0) and body(t0) > avg_body * 2.0:
-        return "長紅K (Long White) [強勢表態] 🟥", 0.6
-    if is_green(t0) and body(t0) > avg_body * 2.0:
-        return "長黑K (Long Black) [恐慌拋售] ⬛", -0.6
+        if trend_up: return "流星 (高檔避雷針) [多轉空] ☄️", -0.7
+        if trend_down: return "倒狀錘頭 (試盤訊號) [醞釀反彈] ☝️", 0.4
+    # 三兵
+    if is_red(t0) and is_red(t1) and is_red(t2) and C0>C1>C2:
+        return "紅三兵 (多頭氣盛) [多頭持續] 💂‍♂️", 0.8
+    if is_green(t0) and is_green(t1) and is_green(t2) and C0<C1<C2:
+        return "黑三兵 (烏鴉滿天) [空頭持續] 🐻", -0.8
     
-    # 16. 缺口 (Gap)
-    if L0 > H1: return "向上跳空 (Gap Up) [強勢] 🆙", 0.5
-    if H0 < L1: return "向下跳空 (Gap Down) [弱勢] ⏬", -0.5
-
     return "整理中 (等待訊號)", 0
 
 # --- 價值與狀態 ---
@@ -402,7 +366,7 @@ def create_stock_chart(stock_code):
             raw_code = stock_code.upper().strip()
             if raw_code.endswith('.TW') or raw_code.endswith('.TWO'): target = raw_code
             else: target = raw_code + ".TW"
-            # 使用 FinMind
+            
             df = fetch_data_finmind(target)
             if df.empty and not (raw_code.endswith('.TW') or raw_code.endswith('.TWO')):
                 target_two = raw_code + ".TWO"
@@ -417,7 +381,7 @@ def create_stock_chart(stock_code):
             eps = get_eps_from_price_pe(price, info_data.get('pe'))
 
             try:
-                bench = fetch_data_finmind("TAIEX")
+                bench = get_benchmark_data() # 改用 get_benchmark_data (已含雙保險)
                 if not bench.empty:
                     common = df.index.intersection(bench.index)
                     if len(common) > 20:
@@ -451,15 +415,20 @@ def create_stock_chart(stock_code):
             rsi = last['RSI'] if not pd.isna(last['RSI']) else 50
             adx = last['ADX'] if not pd.isna(last['ADX']) else 0
             atr = last['ATR'] if not pd.isna(last['ATR']) and last['ATR'] > 0 else price*0.02
+            
+            # 修正 RS 顯示
             rs_val = last['RS'] if 'RS' in df.columns and not pd.isna(last['RS']) else 1.0
-            rs_str = "無數據" if rs_val == 1.0 else ("強於大盤 🦅" if rs_val > 1.05 else ("弱於大盤 🐢" if rs_val < 0.95 else "跟隨"))
+            if rs_val == 1.0: rs_str = "無數據"
+            elif rs_val > 1.05: rs_str = "強於大盤 🦅"
+            elif rs_val < 0.95: rs_str = "弱於大盤 🐢"
+            else: rs_str = "跟隨大盤"
+
             vol_ratio = last['Vol_Ratio'] if not pd.isna(last['Vol_Ratio']) else 1.0
 
-            # ★ v21.0 K線戰法全攻略版 - 使用完整引擎
             kline_pattern, kline_score = detect_kline_pattern(df)
-            
             valuation_status_str, bias_val = get_valuation_status(price, ma60, info_data)
 
+            # 狀態判定
             if adx < 20: trend_quality = "盤整 💤"
             elif adx > 40: trend_quality = "強勁 🔥"
             else: trend_quality = "確立 ✅"
@@ -474,28 +443,31 @@ def create_stock_chart(stock_code):
 
             obv_warning = ""
             try:
-                if len(df) > 10 and df['Close'].iloc[-1] > df['Close'].iloc[-10] and df['OBV'].iloc[-1] < df['OBV'].iloc[-10]:
-                    obv_warning = " (⚠️背離)"
+                if len(df) > 10:
+                    if df['Close'].iloc[-1] > df['Close'].iloc[-10] and df['OBV'].iloc[-1] < df['OBV'].iloc[-10]:
+                        obv_warning = " (⚠️背離)"
             except: pass
 
             entry_status, entry_msg = check_entry_gate(bias_val, rsi)
             entry_warning = f"\n{entry_msg}" if entry_status != "PASS" else ""
 
             advice = "觀望"
-            # 整合 v21.0 K線判斷
+            # v17.2 衝突邏輯修復
             if trend_dir == "多頭":
-                if kline_score <= -0.5: advice = f"⚠️ 警戒：趨勢雖多，但{kline_pattern}，留意回檔"
+                if kline_score <= -0.5: advice = f"⚠️ 警戒：趨勢雖多，但{kline_pattern.split(' ')[0]}，留意回檔"
                 elif "過熱" in valuation_status_str: advice = "⛔ 價值過熱，禁止追價"
                 elif entry_status == "BAN": advice = "⛔ 指標過熱，禁止進場"
                 elif entry_status == "WAIT": advice = "⏳ 短線乖離大，暫緩"
-                elif kline_score > 0: advice = f"✅ 買點浮現 ({kline_pattern})"
+                elif kline_score > 0: advice = f"✅ 買點浮現 ({kline_pattern.split(' ')[0]})"
                 elif adx < 20: advice = "盤整中，多看少做"
+                elif rs_val < 0.95: advice = "弱於大盤，恐補跌"
+                elif 60 <= rsi <= 75: advice = "量價健康，可尋買點"
                 else: advice = "沿月線操作"
             elif trend_dir == "空頭":
-                if kline_score > 0.5: advice = f"空頭反彈 ({kline_pattern})，老手搶短"
+                if kline_score > 0.5: advice = f"空頭反彈 ({kline_pattern.split(' ')[0]})，老手搶短"
                 else: advice = "趨勢向下，勿接刀"
             else:
-                if kline_score > 0.5: advice = f"震盪轉強 ({kline_pattern})，老手試單"
+                if kline_score > 0.5: advice = f"震盪轉強 ({kline_pattern.split(' ')[0]})，老手試單"
                 else: advice = "方向不明，建議觀望"
 
             exit_rule = f"🛑 **停損鐵律**：跌破 {final_stop:.1f} 市價出場。"
@@ -506,7 +478,7 @@ def create_stock_chart(stock_code):
                 f"📈 {trend_dir} | {trend_quality}\n"
                 f"🕯️ {kline_pattern}\n"
                 f"💎 {valuation_status_str}\n"
-                f"🦅 RS: {rs_val:.2f} ({rs_str})\n"
+                f"🦅 RS值: {rs_val:.2f} ({rs_str})\n"
                 f"------------------\n"
                 f"🎯 目標: {target_price_val:.1f} | 🛑 停損: {final_stop:.1f}\n"
                 f"{exit_rule}\n"
@@ -514,6 +486,7 @@ def create_stock_chart(stock_code):
                 f"{entry_warning}\n\n"
                 f"{get_psychology_reminder()}"
             )
+            
             result_text = analysis_report
 
             fig = Figure(figsize=(10, 10))
@@ -544,7 +517,7 @@ def create_stock_chart(stock_code):
         finally: gc.collect()
     return result_file, result_text
 
-# --- 8. 選股功能 (移除隨機) ---
+# --- 8. 選股功能 (移除隨機/修正參數) ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
@@ -565,56 +538,41 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 b_ret = bench['Close'].pct_change(20).iloc[-1]
                 market_commentary = get_market_commentary(mkt)
                 stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
-                if mkt == 'VOLATILE':
-                    return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
+                if mkt == 'VOLATILE': return f"🔴 **市場熔斷啟動**\n系統已強制停止選股功能。", []
             else: raise Exception("Bench Empty")
         except:
-            mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間突破單", "未知"
+            mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間", "未知"
             stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
             market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
 
-        data = yf.download(watch_list, period="3mo", progress=False, threads=False)
-        if data is None or data.empty: return title_prefix, ["Yahoo 限流中，請稍候"]
-
         for stock in watch_list:
+            time.sleep(0.2)
             try:
-                if isinstance(data.columns, pd.MultiIndex):
-                    try:
-                        c = data['Close'][stock]; v = data['Volume'][stock]
-                        h = data['High'][stock]; l = data['Low'][stock]
-                    except: continue
-                else:
-                    c = data['Close']; v = data['Volume']; h = data['High']; l = data['Low']
-                
-                if isinstance(c, pd.DataFrame): 
-                    if c.empty: continue
-                    c=c.iloc[:,0]; v=v.iloc[:,0]; h=h.iloc[:,0]; l=l.iloc[:,0]
-
-                c = c.dropna()
-                if len(c) < 60: continue
-                price = c.iloc[-1]
+                clean_code = stock.split('.')[0]
+                df = fetch_data_finmind(clean_code) # FinMind
+                if df.empty or len(df) < 60: continue
+                price = df['Close'].iloc[-1]
                 if max_price and price > max_price: continue
 
-                ma20 = c.rolling(20).mean(); ma60 = c.rolling(60).mean()
-                v_ma = v.rolling(20).mean()
+                ma20 = df['Close'].rolling(20).mean(); ma60 = df['Close'].rolling(60).mean()
+                v_ma = df['Volume'].rolling(20).mean()
                 slope = ma20.diff(5).iloc[-1]
-                vol_r = v.iloc[-1]/v_ma.iloc[-1] if v_ma.iloc[-1]>0 else 0
-                s_ret = c.pct_change(20).iloc[-1]
+                vol_r = df['Volume'].iloc[-1]/v_ma.iloc[-1] if v_ma.iloc[-1]>0 else 0
+                s_ret = df['Close'].pct_change(20).iloc[-1]
                 rs = (1+s_ret)/(1+b_ret)
-                tr = (h-l).rolling(14).mean().iloc[-1]
+                tr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
                 atr = tr if tr > 0 else price*0.02
                 
-                delta = c.diff()
+                delta = df['Close'].diff()
                 gain = (delta.where(delta>0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta<0, 0)).rolling(14).mean()
                 rs_idx = gain/loss
                 rsi = 100-(100/(1+rs_idx))
                 curr_rsi = rsi.iloc[-1]
-                curr_ma20 = ma20.iloc[-1]; curr_ma60 = ma60.iloc[-1]
 
-                if curr_ma20 > curr_ma60 and slope > 0:
+                if ma20.iloc[-1] > ma60.iloc[-1] and slope > 0:
                     candidates.append({
-                        'stock': stock, 'price': price, 'ma20': curr_ma20, 'ma60': curr_ma60,
+                        'stock': stock, 'price': price, 'ma20': ma20.iloc[-1], 'ma60': ma60.iloc[-1],
                         'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0,
                         'rsi': curr_rsi 
                     })
@@ -624,7 +582,6 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             df = pd.DataFrame(candidates)
             df['rs_rank'] = df['rs_raw'].rank(pct=True)
             df = calculate_score(df, w)
-            
             th = 70 if mkt == 'RANGE' else 60
             df = df.sort_values('total_score', ascending=False)
             picks = df[df['total_score']>=th].head(6)
@@ -637,7 +594,10 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 pos = get_position_sizing(r.total_score)
                 icon = icons[i] if i < 6 else "🔹"
                 
-                entry_status, _ = check_entry_gate(r.price, r.rsi, r.ma20)
+                # ★ 修正呼叫參數：只傳 rsi, bias
+                bias_val = (r.price - r.ma20) / r.ma20 * 100
+                entry_status, _ = check_entry_gate(bias_val, r.rsi)
+                
                 if entry_status == "BAN": continue
                 gate_tag = " (⚠️等回測)" if entry_status == "WAIT" else ""
                 aplus_tag = "💎 A+ 完美訊號" if getattr(r, 'is_aplus', False) else f"屬性: {trade_type}"
@@ -690,14 +650,14 @@ def handle_message(event):
         txt = (
             "🎓 **股市小白 專有名詞懶人包**\n"
             "======================\n\n"
-            "💎 **A+ 完美訊號**\n"
-            "• 趨勢、資金、量能滿分。\n\n"
             "🕯️ **K線教學 (多轉空/空轉多)**\n"
             "• 🌅 **晨星**: [空轉多] 跌勢末端出現一根紅K吃掉黑K，黎明將至。\n"
             "• 🌃 **夜星**: [多轉空] 漲勢末端出現黑K吞噬紅K，黑夜降臨。\n"
             "• 🔥 **吞噬**: [強力反轉] 今日K線完全包覆昨日，力道極強。\n"
             "• 🔨 **錘頭**: [底部支撐] 長下影線，代表低檔有人接手。\n"
-            "• ☄️ **流星**: [頭部壓力] 長上影線，代表高檔有人出貨。"
+            "• ☄️ **流星**: [頭部壓力] 長上影線，代表高檔有人出貨。\n"
+            "• 📈 **貫穿線**: [空轉多] 紅K收盤穿越昨黑K實體一半以上。\n"
+            "• 🌥️ **烏雲蓋頂**: [多轉空] 黑K收盤跌破昨紅K實體一半以上。"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=txt))
         return
@@ -708,7 +668,7 @@ def handle_message(event):
             "======================\n\n"
             "🔍 **個股診斷**\n"
             "輸入：`2330` 或 `8069`\n"
-            "👉 線圖、K線型態、價值評估、教練建議\n\n"
+            "👉 K線型態、市場價值、教練建議\n\n"
             "📊 **智能選股 (自適應)**\n"
             "輸入：`推薦` 或 `選股`\n"
             "👉 自動偵測盤勢，A+訊號優先展示\n\n"
