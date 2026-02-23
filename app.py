@@ -2,7 +2,6 @@ import os
 import time
 import numpy as np
 import pandas as pd
-# 移除 yfinance，全面改用 FinMind
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
@@ -18,8 +17,15 @@ import threading
 from datetime import datetime, timedelta
 import requests
 
+# ★ 自動載入 .env 檔案 (本地端測試用)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass # 雲端環境(如Render)無此套件時忽略，直接吃系統變數
+
 # --- 設定應用程式版本 ---
-APP_VERSION = "v25.1 資安防護版 (移除硬編碼金鑰，請使用環境變數)"
+APP_VERSION = "v25.2 穩定通訊版 (自動載入金鑰 + 精準錯誤提示)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -37,17 +43,15 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
-# --- 1. 設定密鑰 (資安升級：移除明碼，強制使用環境變數) ---
-# 請在 Render/Heroku 等雲端平台的環境變數設定中填寫真實金鑰
+# --- 1. 設定密鑰 (強制使用環境變數) ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '')
-# ★ 您的 FinMind Sponsor 金鑰
 FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', '')
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     logger.error("❌ 嚴重錯誤：找不到 LINE 密鑰！請確認雲端環境變數是否已設定。")
 
-# 只有在金鑰存在時才初始化，避免本機測試直接報錯
+# 只有在金鑰存在時才初始化
 if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -100,9 +104,9 @@ def check_user_state(user_id):
     
     return False, ""
 
-# --- ★ 核心：FinMind API 串接模組 ---
+# --- ★ 核心：FinMind API 串接模組 (強化錯誤回傳) ---
 def call_finmind_api(dataset, data_id, start_date=None, days=365):
-    """通用 FinMind API 呼叫函式 (Sponsor 權限)"""
+    """通用 FinMind API 呼叫函式，回傳 (DataFrame, 錯誤訊息字串)"""
     url = "https://api.finmindtrade.com/api/v4/data"
     if start_date is None:
         start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
@@ -117,18 +121,24 @@ def call_finmind_api(dataset, data_id, start_date=None, days=365):
         if r.status_code == 200:
             j = r.json()
             if j.get('msg') == 'success' and j.get('data'): 
-                return pd.DataFrame(j['data'])
+                return pd.DataFrame(j['data']), ""
+            else:
+                msg = j.get('msg', 'Unknown API Error')
+                logger.warning(f"FinMind API Warning ({data_id}): {msg}")
+                return pd.DataFrame(), msg
+        else:
+            return pd.DataFrame(), f"HTTP Error {r.status_code}"
     except Exception as e:
-        logger.error(f"FinMind API Error ({dataset} - {data_id}): {e}")
-    return pd.DataFrame()
+        logger.error(f"FinMind API Exception ({dataset} - {data_id}): {e}")
+        return pd.DataFrame(), str(e)
 
 def fetch_data_finmind(stock_code, days=400):
-    """專責抓取 K 線資料"""
+    """專責抓取 K 線資料，回傳 (DataFrame, 錯誤訊息)"""
     clean_code = stock_code.split('.')[0]
-    df = call_finmind_api("TaiwanStockPrice", clean_code, days=days)
+    df, err = call_finmind_api("TaiwanStockPrice", clean_code, days=days)
     
     if df.empty: 
-        return pd.DataFrame()
+        return pd.DataFrame(), err
     
     # 格式整理成標準 OHLCV
     df = df.rename(columns={'date':'Date','open':'Open','max':'High','min':'Low','close':'Close','Trading_Volume':'Volume'})
@@ -137,7 +147,7 @@ def fetch_data_finmind(stock_code, days=400):
     for c in ['Open','High','Low','Close','Volume']: 
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce')
     
-    return df.dropna(subset=['Close'])
+    return df.dropna(subset=['Close']), ""
 
 def get_stock_info_finmind(stock_code):
     """專責抓取基本面 (PE)"""
@@ -145,7 +155,7 @@ def get_stock_info_finmind(stock_code):
     if clean_code in INFO_CACHE:
         return INFO_CACHE[clean_code]
         
-    df_per = call_finmind_api("TaiwanStockPER", clean_code, days=15)
+    df_per, _ = call_finmind_api("TaiwanStockPER", clean_code, days=15)
     data = {'eps': 'N/A', 'pe': 'N/A'}
     if not df_per.empty:
         last = df_per.iloc[-1]
@@ -168,17 +178,16 @@ def get_benchmark_data():
     if BENCHMARK_CACHE['data'] is not None and (now - BENCHMARK_CACHE['time']) < 3600:
         return BENCHMARK_CACHE['data']
     
-    # 徹底棄用 Yahoo，只依賴 FinMind 的 TAIEX
-    bench = fetch_data_finmind("TAIEX", days=400)
+    bench, err = fetch_data_finmind("TAIEX", days=400)
     if not bench.empty and len(bench) > 20:
         BENCHMARK_CACHE['data'] = bench
         BENCHMARK_CACHE['time'] = now
         return bench
     
-    logger.error("❌ 大盤資料下載失敗 (FinMind TAIEX)")
+    logger.error(f"❌ 大盤資料下載失敗 (FinMind TAIEX): {err}")
     return pd.DataFrame()
 
-# --- 4. 資料庫定義 (完整版) ---
+# --- 4. 資料庫定義 ---
 SECTOR_DICT = {
     "百元績優": ['2303', '2317', '2454', '2603', '2881', '1605', '2382', '3231', '2409', '2609', '2615', '2002', '2882', '0050', '0056', '2324', '2356', '2353', '2352', '3481', '2408', '2344', '2337', '3702', '2312', '6282', '3260', '8150', '6147', '5347', '2363', '2449', '3036', '2884', '2880', '2886', '2891', '2892', '5880', '2885', '2890', '2883', '2887', '2834', '2801', '1101', '1102', '2027', '1402', '1907', '2105', '2618', '2610', '9945', '2542', '00878', '00929', '00919'],
     "半導體": ['2330', '2454', '2303', '3711', '3034', '2379', '3443', '3035', '3661'],
@@ -189,7 +198,7 @@ SECTOR_DICT = {
 }
 
 CODE_NAME_MAP = {
-    '2330': '台積電', '2454': '聯發科', '2303': '聯電', '2317': '鴻海', '2409': '友達', '2603': '長榮', '1605': '華新', '2609': '陽明', '3481': '群創', '2615': '萬海', '2618': '長榮航', '2610': '華航', '2637': '慧洋', '2606': '裕民', '2002': '中鋼', '2014': '中鴻', '2027': '大成鋼', '1301': '台塑', '1402': '遠東新', '1101': '台泥', '2881': '富邦金', '2882': '國泰金', '0050': '元大台灣50', '0056': '元大高股息', '3231': '緯創', '2382': '廣達', '2376': '技嘉', '2356': '英業達', '3037': '欣興', '2324': '仁寶', '2357': '華碩', '5880': '合庫金', '2891': '中信金', '2892': '第一金', '2886': '兆豐金', '2884': '玉山金', '2885': '元大金', '2890': '永豐金', '2883': '開發金', '2887': '台新金', '2880': '華南金', '2834': '臺企銀', '2801': '彰銀', '1102': '亞泥', '1907': '永豐餘', '2105': '正新', '9945': '潤泰新', '2542': '興富發', '00878': '國泰永續', '00929': '復華科優息', '00919': '群益精選', '2353': '宏碁', '2352': '佳世達', '2408': '南亞科', '2344': '華邦電', '2337': '旺宏', '3702': '大聯大', '2312': '金寶', '6282': '康舒', '3260': '威剛', '8150': '南茂', '6147': '頎邦', '5347': '世界', '2363': '矽統', '2449': '京元電', '3036': '文曄'
+    '2330': '台積電', '2454': '聯發科', '2303': '聯電', '2317': '鴻海', '2409': '友達', '2603': '長榮', '1605': '華新', '2609': '陽明', '3481': '群創', '2615': '萬海', '2618': '長榮航', '2610': '華航', '2637': '慧洋', '2606': '裕民', '2002': '中鋼', '2014': '中鴻', '2027': '大成鋼', '1301': '台塑', '1402': '遠東新', '1101': '台泥', '2881': '富邦金', '2882': '國泰金', '0050': '元大台灣50', '0056': '元大高股息', '3231': '緯創', '2382': '廣達', '2376': '技嘉', '2356': '英業達', '3037': '欣興', '2324': '仁寶', '2357': '華碩', '5880': '合庫金', '2891': '中信金', '2892': '第一金', '2886': '兆豐金', '2884': '玉山金', '2885': '元大金', '2890': '永豐金', '2883': '開發金', '2887': '台新金', '2880': '華南金', '2834': '臺企銀', '2801': '彰銀', '1102': '亞泥', '1907': '永豐餘', '2105': '正新', '9945': '潤泰新', '2542': '興富發', '00878': '國泰永續', '00929': '復華科優息', '00919': '群益精選', '2353': '宏碁', '2352': '佳世達', '2408': '南亞科', '2344': '華邦電', '2337': '旺宏', '3702': '大聯大', '2312': '金寶', '6282': '康舒', '3260': '威剛', '8150': '南茂', '6147': '頎邦', '5347': '世界', '2363': '矽統', '2449': '京元電', '3036': '文曄', '6446': '藥華藥'
 }
 
 def get_stock_name(stock_code):
@@ -361,7 +370,7 @@ def check_entry_gate(bias, rsi):
     if rsi > 85: return "BAN", "指標過熱"
     return "PASS", "符合"
 
-# --- 7. 繪圖引擎 ---
+# --- 7. 繪圖引擎 (強化除錯提示) ---
 def create_stock_chart(stock_code):
     gc.collect()
     result_file = None
@@ -369,10 +378,15 @@ def create_stock_chart(stock_code):
     with plot_lock:
         try:
             target = stock_code.upper().strip()
-            # 移除了所有 yf 備援機制，完全依賴 FinMind
-            df = fetch_data_finmind(target)
+            
+            # 使用 FinMind，並獲取潛在的 API 錯誤訊息
+            df, err_msg = fetch_data_finmind(target)
 
-            if df.empty: return None, f"FinMind 查無代號 {target} 資料。"
+            if df.empty: 
+                err_text = f"查無代號 {target} 資料。"
+                if err_msg: err_text += f"\nFinMind 系統訊息: {err_msg}"
+                if not FINMIND_TOKEN: err_text += "\n⚠️ 未偵測到 FINMIND_TOKEN，可能觸發免費次數限制。"
+                return None, err_text
             
             stock_name = get_stock_name(target)
             info_data = get_stock_info_finmind(target)
@@ -500,7 +514,7 @@ def create_stock_chart(stock_code):
         finally: gc.collect()
     return result_file, result_text
 
-# --- 8. 選股功能 (★ v25.0 FinMind ThreadPool 多線程加速) ---
+# --- 8. 選股功能 ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
@@ -513,18 +527,16 @@ def scan_potential_stocks(max_price=None, sector_name=None):
     candidates = []
 
     try:
-        try:
-            bench = get_benchmark_data()
-            if not bench.empty:
-                mkt = detect_market_state(bench)
-                w = WEIGHT_BY_STATE[mkt]
-                b_ret = bench['Close'].pct_change(20).iloc[-1]
-                market_commentary = get_market_commentary(mkt)
-                stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
-                if mkt == 'VOLATILE':
-                    return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
-            else: raise Exception("Bench Empty")
-        except:
+        bench = get_benchmark_data()
+        if not bench.empty:
+            mkt = detect_market_state(bench)
+            w = WEIGHT_BY_STATE[mkt]
+            b_ret = bench['Close'].pct_change(20).iloc[-1]
+            market_commentary = get_market_commentary(mkt)
+            stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
+            if mkt == 'VOLATILE':
+                return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
+        else:
             mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間突破單", "未知"
             stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
             market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
@@ -532,7 +544,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
         def process_stock_for_scan(stock):
             """單一股票掃描邏輯，供 ThreadPoolExecutor 呼叫"""
             try:
-                df = fetch_data_finmind(stock)
+                df, err = fetch_data_finmind(stock)
                 if df.empty or len(df) < 60: return None
                 price = df['Close'].iloc[-1]
                 if max_price and price > max_price: return None
@@ -564,12 +576,15 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                 pass
             return None
 
-        # ★ 多執行緒加速下載與計算 (充分利用 Sponsor 權限)
+        # 多執行緒加速下載與計算
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_stock = {executor.submit(process_stock_for_scan, stock): stock for stock in watch_list}
             for future in as_completed(future_to_stock):
                 res = future.result()
                 if res: candidates.append(res)
+
+        if not candidates:
+             return title_prefix, ["今日掃描無符合強勢條件之個股，或因 API 限制查無資料。"]
 
         if candidates:
             df = pd.DataFrame(candidates)
@@ -608,7 +623,7 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             recommendations.append(f"\n{get_psychology_reminder()}")
 
     except Exception as e:
-        return title_prefix, [f"掃描錯誤: {str(e)}"]
+        return title_prefix, [f"掃描發生未預期錯誤: {str(e)}"]
 
     return title_prefix, recommendations
 
@@ -670,7 +685,7 @@ def handle_message(event):
             f"🤖 **股市全能助理** ({APP_VERSION})\n"
             "======================\n\n"
             "🔍 **個股診斷**\n"
-            "輸入：`2330` 或 `8069`\n"
+            "輸入：`2330` 或 `6446`\n"
             "👉 線圖、K線型態、價值評估、教練建議\n\n"
             "📊 **智能選股 (極速版)**\n"
             "輸入：`推薦` 或 `選股`\n"
