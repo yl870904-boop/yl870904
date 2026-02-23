@@ -1,7 +1,7 @@
 flask
 line-bot-sdk
-yfinance>=0.2.40
 pandas
 numpy
 matplotlib
 gunicorn
+requests
