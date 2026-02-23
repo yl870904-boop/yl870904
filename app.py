@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 import requests
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v25.0 尊榮贊助版 (全線 FinMind V4 + 多線程極速掃描)"
+APP_VERSION = "v25.1 資安防護版 (移除硬編碼金鑰，請使用環境變數)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -37,17 +37,20 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
-# --- 1. 設定密鑰 ---
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '(REMOVED_LINE_TOKEN)')
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '(REMOVED_LINE_SECRET)')
+# --- 1. 設定密鑰 (資安升級：移除明碼，強制使用環境變數) ---
+# 請在 Render/Heroku 等雲端平台的環境變數設定中填寫真實金鑰
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '')
 # ★ 您的 FinMind Sponsor 金鑰
-FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', '(REMOVED_FINMIND_TOKEN)')
+FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', '')
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    logger.error("❌ 嚴重錯誤：找不到 LINE 密鑰！")
+    logger.error("❌ 嚴重錯誤：找不到 LINE 密鑰！請確認雲端環境變數是否已設定。")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+# 只有在金鑰存在時才初始化，避免本機測試直接報錯
+if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 2. 準備字型與圖片目錄 ---
 static_dir = 'static_images'
