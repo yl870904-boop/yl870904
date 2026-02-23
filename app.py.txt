@@ -19,8 +19,7 @@ app = Flask(__name__)
 
 # --- 1. 設定密鑰 (Render 環境變數優先，找不到則使用預設值) ---
 # 建議：為了安全，之後請在 Render 後台設定這些變數，不要將真實密鑰推送到公開的 GitHub
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '(REMOVED_LINE_TOKEN)')
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '(REMOVED_LINE_SECRET)')
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', 
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -230,4 +229,5 @@ def handle_message(event):
             )
 
 if __name__ == "__main__":
+
     app.run()
