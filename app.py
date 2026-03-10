@@ -2,7 +2,6 @@ import os
 import time
 import numpy as np
 import pandas as pd
-# 移除 yfinance，全面改用 FinMind
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
@@ -19,7 +18,7 @@ from datetime import datetime, timedelta
 import requests
 
 # --- 設定應用程式版本 ---
-APP_VERSION = "v25.3 Render 雲端部署正式版 (純環境變數安全版)"
+APP_VERSION = "v26.0 雲端量化回測版 (內建 10 大策略回測引擎)"
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -71,7 +70,7 @@ except: my_font = None
 INFO_CACHE = {}
 BENCHMARK_CACHE = {'data': None, 'time': 0}
 USER_USAGE = {}
-MAX_REQUESTS_PER_WINDOW = 5
+MAX_REQUESTS_PER_WINDOW = 15
 WINDOW_SECONDS = 300
 COOLDOWN_SECONDS = 600
 
@@ -120,10 +119,10 @@ def call_finmind_api(dataset, data_id, start_date=None, days=365):
         logger.error(f"FinMind API Error ({dataset} - {data_id}): {e}")
     return pd.DataFrame()
 
-def fetch_data_finmind(stock_code, days=400):
+def fetch_data_finmind(stock_code, days=400, start_date=None):
     """專責抓取 K 線資料"""
     clean_code = stock_code.split('.')[0]
-    df = call_finmind_api("TaiwanStockPrice", clean_code, days=days)
+    df = call_finmind_api("TaiwanStockPrice", clean_code, days=days, start_date=start_date)
     
     if df.empty: 
         return pd.DataFrame()
@@ -166,14 +165,11 @@ def get_benchmark_data():
     if BENCHMARK_CACHE['data'] is not None and (now - BENCHMARK_CACHE['time']) < 3600:
         return BENCHMARK_CACHE['data']
     
-    # 徹底棄用 Yahoo，只依賴 FinMind 的 TAIEX
     bench = fetch_data_finmind("TAIEX", days=400)
     if not bench.empty and len(bench) > 20:
         BENCHMARK_CACHE['data'] = bench
         BENCHMARK_CACHE['time'] = now
         return bench
-    
-    logger.error("❌ 大盤資料下載失敗 (FinMind TAIEX)")
     return pd.DataFrame()
 
 # --- 4. 資料庫定義 (完整版) ---
@@ -321,8 +317,6 @@ def get_psychology_reminder():
     quotes = ["💡 心法：Score 高不代表必勝，只代表勝率較高。", "💡 心法：新手死於追高，老手死於抄底。", "💡 心法：連續虧損時，縮小部位或停止交易。", "💡 心法：不持有部位，也是一種部位。", "💡 心法：交易的目標不是全對，而是活得久。"]
     return random.choice(quotes)
 
-WEIGHT_BY_STATE = {'TREND': {'trend': 0.6, 'momentum': 0.3, 'risk': 0.1}, 'RANGE': {'trend': 0.4, 'momentum': 0.2, 'risk': 0.4}, 'VOLATILE': {'trend': 0.3, 'momentum': 0.4, 'risk': 0.3}}
-
 def calculate_score(df_cand, weights):
     score_rs = df_cand['rs_rank'] * 100
     score_ma = np.where(df_cand['ma20'] > df_cand['ma60'], 100, 0)
@@ -367,7 +361,6 @@ def create_stock_chart(stock_code):
     with plot_lock:
         try:
             target = stock_code.upper().strip()
-            # 移除了所有 yf 備援機制，完全依賴 FinMind
             df = fetch_data_finmind(target)
 
             if df.empty: return None, f"FinMind 查無代號 {target} 資料。"
@@ -498,7 +491,7 @@ def create_stock_chart(stock_code):
         finally: gc.collect()
     return result_file, result_text
 
-# --- 8. 選股功能 (★ v25.0 FinMind ThreadPool 多線程加速) ---
+# --- 8. 選股功能 ---
 def scan_potential_stocks(max_price=None, sector_name=None):
     if sector_name and sector_name in SECTOR_DICT:
         watch_list = SECTOR_DICT[sector_name]
@@ -511,24 +504,21 @@ def scan_potential_stocks(max_price=None, sector_name=None):
     candidates = []
 
     try:
-        try:
-            bench = get_benchmark_data()
-            if not bench.empty:
-                mkt = detect_market_state(bench)
-                w = WEIGHT_BY_STATE[mkt]
-                b_ret = bench['Close'].pct_change(20).iloc[-1]
-                market_commentary = get_market_commentary(mkt)
-                stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
-                if mkt == 'VOLATILE':
-                    return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
-            else: raise Exception("Bench Empty")
-        except:
-            mkt, w, b_ret, trade_type, risk_desc = 'RANGE', WEIGHT_BY_STATE['RANGE'], 0, "區間突破單", "未知"
+        bench = get_benchmark_data()
+        if not bench.empty:
+            mkt = detect_market_state(bench)
+            w = {'TREND': {'trend': 0.6, 'momentum': 0.3, 'risk': 0.1}, 'RANGE': {'trend': 0.4, 'momentum': 0.2, 'risk': 0.4}, 'VOLATILE': {'trend': 0.3, 'momentum': 0.4, 'risk': 0.3}}[mkt]
+            b_ret = bench['Close'].pct_change(20).iloc[-1]
+            market_commentary = get_market_commentary(mkt)
+            stop_mult, target_mult, max_days, trade_type, risk_desc, max_trades = get_trade_params(mkt)
+            if mkt == 'VOLATILE':
+                return f"🔴 **市場熔斷啟動**\n\n目前盤勢為【{mkt}】，風險極高。\n系統已強制停止選股功能，請保留現金，靜待落底訊號。", []
+        else:
+            mkt, w, b_ret, trade_type, risk_desc = 'RANGE', {'trend': 0.4, 'momentum': 0.2, 'risk': 0.4}, 0, "區間突破單", "未知"
             stop_mult, target_mult, max_days, max_trades = 1.0, 1.5, 10, "1"
             market_commentary = "⚠️ 無法取得大盤狀態，請保守操作。"
 
         def process_stock_for_scan(stock):
-            """單一股票掃描邏輯，供 ThreadPoolExecutor 呼叫"""
             try:
                 df = fetch_data_finmind(stock)
                 if df.empty or len(df) < 60: return None
@@ -558,16 +548,17 @@ def scan_potential_stocks(max_price=None, sector_name=None):
                         'slope': slope, 'vol_ratio': vol_r, 'atr': atr, 'rs_raw': rs, 'rs_rank': 0,
                         'rsi': curr_rsi 
                     }
-            except: 
-                pass
+            except: pass
             return None
 
-        # ★ 多執行緒加速下載與計算 (充分利用 Sponsor 權限)
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_stock = {executor.submit(process_stock_for_scan, stock): stock for stock in watch_list}
             for future in as_completed(future_to_stock):
                 res = future.result()
                 if res: candidates.append(res)
+
+        if not candidates:
+             return title_prefix, ["今日掃描無符合強勢條件之個股，或因 API 限制查無資料。"]
 
         if candidates:
             df = pd.DataFrame(candidates)
@@ -606,9 +597,195 @@ def scan_potential_stocks(max_price=None, sector_name=None):
             recommendations.append(f"\n{get_psychology_reminder()}")
 
     except Exception as e:
-        return title_prefix, [f"掃描錯誤: {str(e)}"]
+        return title_prefix, [f"掃描發生未預期錯誤: {str(e)}"]
 
     return title_prefix, recommendations
+
+# --- ★ v26.0 雲端量化回測引擎 ---
+def run_multi_strategy_backtest(stock_code):
+    clean_code = stock_code.upper().replace('.TW', '').replace('.TWO', '').strip()
+    stock_name = get_stock_name(clean_code)
+    
+    # 定義回測區間 (近一年)
+    end_date_dt = datetime.now()
+    start_date_dt = end_date_dt - timedelta(days=365)
+    start_date = start_date_dt.strftime('%Y-%m-%d')
+    end_date = end_date_dt.strftime('%Y-%m-%d')
+    
+    try:
+        # 多線程抓取四大資料庫
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            f_price = executor.submit(fetch_data_finmind, clean_code, 400, start_date)
+            f_bench = executor.submit(fetch_data_finmind, "0050", 400, start_date)
+            f_inst = executor.submit(call_finmind_api, "TaiwanStockInstitutionalInvestorsBuySell", clean_code, start_date)
+            f_margin = executor.submit(call_finmind_api, "TaiwanStockMarginPurchaseShortSale", clean_code, start_date)
+        
+        df = f_price.result()
+        bench_df = f_bench.result()
+        df_inst = f_inst.result()
+        df_margin = f_margin.result()
+
+        if df.empty or bench_df.empty:
+            return f"❌ {clean_code} 回測資料不足，請確認代號或 API 狀態。"
+        
+        # 對齊日期
+        df = df.loc[start_date:]
+        bench_df = bench_df.loc[start_date:]
+        common_idx = df.index.intersection(bench_df.index)
+        df = df.loc[common_idx]
+        bench_df = bench_df.loc[common_idx]
+
+        if len(df) < 50: return f"❌ {clean_code} 有效交易日不足，無法回測。"
+
+        # --- 計算大盤基準 ---
+        bench_daily_ret = bench_df['Close'].pct_change().fillna(0)
+        bench_cum = (1 + bench_daily_ret).cumprod()
+        bench_ret = bench_cum.iloc[-1] - 1
+        bench_mdd = (bench_cum / bench_cum.cummax() - 1).min()
+
+        # --- 預先計算個股指標 ---
+        close = df['Close']
+        ma5 = close.rolling(5).mean()
+        ma20 = close.rolling(20).mean()
+        
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        macdsig = macd.ewm(span=9, adjust=False).mean()
+        
+        min9 = df['Low'].rolling(9).min()
+        max9 = df['High'].rolling(9).max()
+        rsv = (close - min9) / (max9 - min9 + 1e-9) * 100
+        k = rsv.ewm(com=2, adjust=False).mean()
+        d = k.ewm(com=2, adjust=False).mean()
+        
+        low20 = close.rolling(20).min()
+        high20 = close.rolling(20).max()
+
+        results = []
+        
+        # --- 核心績效計算器 (支援手續費與稅金) ---
+        def calc_perf(sig):
+            pos = sig.shift(1).fillna(0) # T日訊號，T+1日持有
+            trade = pos.diff().fillna(0)
+            daily_ret = close.pct_change().fillna(0)
+            
+            # 手續費 0.1425%, 交易稅 0.3%
+            buy_cost = (trade == 1) * 0.001425
+            sell_cost = (trade == -1) * 0.004425
+            
+            net_ret = pos * daily_ret - buy_cost - sell_cost
+            cum = (1 + net_ret).cumprod()
+            if len(cum) > 0:
+                final = cum.iloc[-1] - 1
+                mdd = (cum / cum.cummax() - 1).min()
+                return final, mdd
+            return 0, 0
+
+        # 1. ContinueHolding (買入持有)
+        sig_hold = pd.Series(1, index=df.index)
+        results.append(("Holding", *calc_perf(sig_hold)))
+
+        # 2. MaCrossOver (5日線上穿20日線)
+        sig_ma = (ma5 > ma20).astype(int)
+        results.append(("MaCrossOver", *calc_perf(sig_ma)))
+
+        # 3. MacdCrossOver
+        sig_macd = (macd > macdsig).astype(int)
+        results.append(("MacdCross", *calc_perf(sig_macd)))
+
+        # 4. KdCrossOver
+        sig_kdx = (k > d).astype(int)
+        results.append(("KdCrossOver", *calc_perf(sig_kdx)))
+
+        # 5. Kd (低買高賣)
+        sig_kd = pd.Series(np.nan, index=df.index)
+        sig_kd[k < 20] = 1
+        sig_kd[k > 80] = 0
+        sig_kd = sig_kd.ffill().fillna(0)
+        results.append(("Kd", *calc_perf(sig_kd)))
+
+        # 6. NaiveKd (>50 買入)
+        sig_nkd = (k > 50).astype(int)
+        results.append(("NaiveKd", *calc_perf(sig_nkd)))
+
+        # 7. Bias (乖離率過低買入)
+        bias = (close - ma20) / ma20
+        sig_bias = pd.Series(np.nan, index=df.index)
+        sig_bias[bias < -0.05] = 1
+        sig_bias[bias > 0.05] = 0
+        sig_bias = sig_bias.ffill().fillna(0)
+        results.append(("Bias", *calc_perf(sig_bias)))
+
+        # 8. MaxMinPeriodBias (創新低買，創新高賣)
+        sig_mm = pd.Series(np.nan, index=df.index)
+        sig_mm[close <= low20] = 1
+        sig_mm[close >= high20] = 0
+        sig_mm = sig_mm.ffill().fillna(0)
+        results.append(("MaxMinBias", *calc_perf(sig_mm)))
+
+        # 9. InstitutionalInvestorsFollower (法人跟隨)
+        if not df_inst.empty and 'date' in df_inst.columns:
+            df_inst['date'] = pd.to_datetime(df_inst['date'])
+            df_inst['net'] = df_inst['buy'] - df_inst['sell']
+            daily_inst = df_inst.groupby('date')['net'].sum()
+            
+            sig_inst_temp = pd.Series(np.nan, index=df.index)
+            # 確保有資料的日子才去標記
+            common_d = daily_inst.index.intersection(df.index)
+            sig_inst_temp.loc[daily_inst[daily_inst > 0].index.intersection(common_d)] = 1
+            sig_inst_temp.loc[daily_inst[daily_inst < 0].index.intersection(common_d)] = 0
+            sig_inst = sig_inst_temp.ffill().fillna(0)
+            results.append(("InstFollow", *calc_perf(sig_inst)))
+        else:
+            results.append(("InstFollow", 0, 0))
+
+        # 10. ShortSaleMarginPurchaseRatio (融資跟隨)
+        if not df_margin.empty and 'date' in df_margin.columns:
+            df_margin['date'] = pd.to_datetime(df_margin['date'])
+            df_margin = df_margin.set_index('date')
+            common_m = df.index.intersection(df_margin.index)
+            if 'MarginPurchaseTodayBalance' in df_margin.columns:
+                margin_bal = df_margin.loc[common_m, 'MarginPurchaseTodayBalance']
+                margin_diff = margin_bal.diff()
+                sig_margin = (margin_diff > 0).astype(int).reindex(df.index).fillna(0)
+                results.append(("MarginRatio", *calc_perf(sig_margin)))
+            else:
+                results.append(("MarginRatio", 0, 0))
+        else:
+            results.append(("MarginRatio", 0, 0))
+
+        # --- 生成報告 ---
+        report = f"📊 {stock_name} ({clean_code}) 10大策略回測\n"
+        report += f"起始: {start_date} | 結束: {end_date}\n"
+        report += f"基準(0050) 獲利: {bench_ret*100:.1f}% | 損失: {bench_mdd*100:.1f}%\n"
+        report += f"資金: 100萬 | 手續費: 0.1425% | 稅金: 0.3%\n"
+        report += "=====================\n"
+        report += "策略 | 損失/大盤 | 獲利/大盤\n"
+        report += "---------------------\n"
+        
+        for name, ret, mdd in results:
+            short_name = name[:11].ljust(11) 
+            report += f"{short_name} | {mdd*100:.1f}%/{bench_mdd*100:.1f}% | {ret*100:.1f}%/{bench_ret*100:.1f}%\n"
+            
+        report += "=====================\n"
+        
+        # 尋找最佳策略 (排除完全沒交易的 0% 策略)
+        valid_results = [r for r in results if r[1] != 0]
+        if valid_results:
+            best_ret_strat = max(valid_results, key=lambda x: x[1])
+            best_mdd_strat = max(valid_results, key=lambda x: x[2]) # MDD為負數，max代表最接近0
+            
+            report += f"🏆 最佳獲利: {best_ret_strat[0]} ({best_ret_strat[1]*100:.1f}%)\n"
+            report += f"🛡️ 最抗跌: {best_mdd_strat[0]} ({best_mdd_strat[2]*100:.1f}%)\n\n"
+            report += "💡 【組合分析建議】:\n"
+            report += f"單一策略盲點多，建議結合高報酬的【{best_ret_strat[0]}】提供攻擊動能，並輔以【{best_mdd_strat[0]}】控制下檔風險，打造穩健的雙因子模型。"
+        
+        return report
+        
+    except Exception as e:
+        logger.error(f"回測引擎錯誤: {traceback.format_exc()}")
+        return f"❌ 回測發生系統錯誤: {str(e)}"
 
 # --- 9. Bot Handler ---
 @app.route("/callback", methods=['POST'])
@@ -663,13 +840,27 @@ def handle_message(event):
     elif any(x in msg for x in ["智能", "選股", "幫我選"]):
         msg = "推薦"
 
+    # ★ v26.0 攔截回測指令
+    if msg.startswith("回測") or msg.startswith("分析"):
+        stock_code = msg.replace("回測", "").replace("分析", "").strip()
+        if not stock_code:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入要回測的代號，例如：回測 2330"))
+            return
+        
+        report_txt = run_multi_strategy_backtest(stock_code)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=report_txt))
+        return
+
     if msg in ["功能", "指令", "Help", "help", "menu"]:
         menu = (
             f"🤖 **股市全能助理** ({APP_VERSION})\n"
             "======================\n\n"
             "🔍 **個股診斷**\n"
-            "輸入：`2330` 或 `8069`\n"
+            "輸入：`2330`\n"
             "👉 線圖、K線型態、價值評估、教練建議\n\n"
+            "🔬 **10大策略回測 (Premium)**\n"
+            "輸入：`回測 2330`\n"
+            "👉 執行一年期策略回測與優缺點分析\n\n"
             "📊 **智能選股 (極速版)**\n"
             "輸入：`推薦` 或 `選股`\n"
             "👉 自動偵測盤勢，A+訊號優先展示\n\n"
@@ -679,8 +870,6 @@ def handle_message(event):
             "🏅 **績優選股**\n"
             "輸入：`績優股`\n"
             "👉 掃描精選績優股\n\n"
-            "🏭 **板塊推薦**\n"
-            "輸入：`[名稱]推薦` (如：`半導體推薦`)\n\n"
             "📖 **K線教學**\n"
             "輸入：`說明`"
         )
